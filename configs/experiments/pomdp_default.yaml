@@ -1,0 +1,77 @@
+# Default POMDP experiment configuration
+# Usage: uv run python scripts/run_experiment.py --config configs/experiments/pomdp_default.yaml
+
+experiment:
+  name: pomdp_belief_estimation
+  description: "Quantum vs Classical POMDP Belief State Estimation"
+  case: pomdp
+
+backend:
+  backend_type: local_aer
+  use_simulator: true
+  shots: 4096
+
+mitigation:
+  enabled: true
+  strategies:
+    - zne
+    - readout
+  zne_scale_factors: [1.0, 2.0, 3.0]
+  zne_factory: Richardson
+
+benchmark:
+  output_dir: results/pomdp
+  use_sqlite: true
+  num_trials: 5
+  base_seed: 42
+  problem_sizes: [2, 4, 8, 16]
+
+logging:
+  level: INFO
+  format: console  # console or json
+  log_file: logs/pomdp_experiment.log
+
+# POMDP-specific parameters
+case_parameters:
+  # Scenario selection
+  scenario: tiger  # tiger, grid_navigation, gps_denied
+
+  # Tiger problem
+  tiger:
+    listen_accuracy: 0.85
+    num_episodes: 100
+    max_steps_per_episode: 20
+
+  # Grid navigation
+  grid_navigation:
+    grid_sizes: [4, 6, 8]
+    sensor_accuracy: 0.8
+    num_episodes: 50
+    max_steps_per_episode: 50
+
+  # GPS-denied navigation
+  gps_denied:
+    grid_size: 4
+    sensor_accuracy: 0.7
+    num_episodes: 50
+    max_steps_per_episode: 100
+
+  # QBRL algorithm settings
+  qbrl:
+    horizon: 2
+    num_samples: 100
+    use_quantum: true
+    use_amplitude_amplification: true
+    aa_iterations: 1
+
+  # Classical baselines
+  baselines:
+    - pomcp
+    - pbvi
+    - despot
+  pomcp:
+    num_simulations: 1000
+    max_depth: 10
+  pbvi:
+    num_belief_points: 100
+    max_iterations: 50

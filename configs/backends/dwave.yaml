@@ -1,0 +1,34 @@
+# D-Wave quantum annealing backend configuration
+# Requires: DWAVE_API_TOKEN environment variable
+
+backend:
+  backend_type: dwave
+  # solver_name: null  # Auto-select best available
+  use_hybrid: false
+
+annealing:
+  num_reads: 1000
+  annealing_time_us: 20.0
+  # Reverse annealing for warm-starting
+  use_reverse_annealing: false
+  reverse_initial_state: null
+  reverse_schedule: null
+
+embedding:
+  # Chain strength auto-calibration
+  chain_strength: null  # null = auto
+  # Embedding method
+  method: minorminer  # minorminer or clique
+
+hybrid:
+  # LeapHybrid for large problems (>200 variables)
+  time_limit_s: 5
+  # Constrained Quadratic Model (CQM)
+  use_cqm: false
+
+# Advantage2 approximate specs (2026)
+hardware_info:
+  processor: Advantage2
+  num_qubits: 5000
+  topology: zephyr
+  connectivity: 20  # degree

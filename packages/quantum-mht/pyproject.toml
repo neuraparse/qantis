@@ -1,0 +1,20 @@
+[project]
+name = "quantum-mht"
+version = "0.1.0"
+description = "Quantum Multi-Hypothesis Tracking for drone swarms"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+dependencies = [
+    "quantum-common",
+]
+
+[tool.uv.sources]
+quantum-common = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quantum_mht"]

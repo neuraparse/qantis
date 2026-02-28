@@ -1,0 +1,31 @@
+# Azure Quantum backend configuration
+# Requires: AZURE_QUANTUM_RESOURCE_ID, AZURE_QUANTUM_LOCATION
+
+backend:
+  backend_type: azure_quantum
+  location: eastus
+
+targets:
+  # IonQ trapped-ion
+  ionq_simulator: ionq.simulator
+  ionq_harmony: ionq.qpu
+  ionq_aria: ionq.qpu.aria-1
+  # Quantinuum trapped-ion
+  quantinuum_syntax: quantinuum.sim.h1-1sc
+  quantinuum_emulator: quantinuum.sim.h1-1e
+  quantinuum_h1: quantinuum.qpu.h1-1
+  quantinuum_h2: quantinuum.qpu.h2-1
+
+# Default target
+default_target: ionq.simulator
+
+execution:
+  shots: 1024
+  # IonQ native gates for better performance
+  use_native_gates: false
+
+# Resource estimation
+resource_estimation:
+  enabled: true
+  error_budget: 0.01
+  qubit_scheme: gate_based

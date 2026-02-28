@@ -1,0 +1,69 @@
+[project]
+name = "qantis"
+version = "0.1.0"
+description = "QANTIS — Quantum Autonomous Navigation, Tracking & Intelligence System by Neura Parse Ltd"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Neura Parse Ltd" }]
+readme = "README.md"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qantis"]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6.0,<7",
+    "pytest-benchmark>=5.1,<6",
+    "mypy>=1.14,<2",
+    "ruff>=0.9,<1",
+    "pre-commit>=4.0,<5",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["packages/*/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["quantum_common", "quantum_pomdp", "quantum_mht"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+packages = ["quantum_common", "quantum_pomdp", "quantum_mht"]
+
+[[tool.mypy.overrides]]
+module = [
+    "qiskit.*", "qiskit_ibm_runtime.*", "qiskit_aer.*", "qiskit_algorithms.*",
+    "qiskit_optimization.*", "qiskit_machine_learning.*",
+    "pennylane.*", "mitiq.*", "dimod.*", "dwave.*", "neal.*",
+    "pyqubo.*", "qsharp.*", "azure.*",
+    "plotly.*", "structlog.*", "pomdp_py.*", "motmetrics.*", "filterpy.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = [
+    "packages/quantum-common/tests",
+    "packages/quantum-pomdp/tests",
+    "packages/quantum-mht/tests",
+]
+markers = [
+    "integration: marks tests requiring live quantum backend connectivity",
+    "benchmark: marks benchmark regression tests",
+    "slow: marks tests that take more than 30 seconds",
+    "hardware: marks tests requiring real quantum hardware access",
+]
+addopts = "-m 'not integration and not benchmark and not hardware' --strict-markers --import-mode=importlib"

@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+uv.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment / Secrets
+.env
+.env.local
+
+# Quantum cache
+.quantum_cache/
+
+# Results & outputs
+benchmark_results/
+experiments/results/
+*.sqlite
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+documents/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Paper files (LaTeX, outputs, backups)
+paper/
+paper_backup*/
+
+# IBM Quantum outputs & hardware results
+output/hardware/
+configs/backends/ibm_quantum.yaml
+
+# General output directory
+output/

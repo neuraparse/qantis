@@ -1,0 +1,53 @@
+[project]
+name = "quantum-common"
+version = "0.1.0"
+description = "Shared quantum computing infrastructure for autonomous systems research"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+dependencies = [
+    # Scientific computing (core)
+    "numpy>=1.26,<3",
+    "scipy>=1.12,<2",
+    # Configuration and validation
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "pyyaml>=6.0,<7",
+    # Logging
+    "structlog>=24.4,<26",
+    "rich>=13.9,<15",
+]
+
+[project.optional-dependencies]
+# Individual quantum backends (install only what you need)
+ibm = [
+    "qiskit>=2.0,<3",
+    "qiskit-ibm-runtime>=0.30,<1",
+    "qiskit-aer>=0.15,<1",
+    "qiskit-optimization>=0.6,<1",
+]
+dwave = [
+    "dwave-ocean-sdk>=7.0,<10",
+    "pyqubo>=1.4,<2",
+]
+pennylane = [
+    "pennylane>=0.40,<1",
+]
+mitiq = [
+    "mitiq>=0.38,<1",
+]
+viz = [
+    "matplotlib>=3.9,<4",
+    "plotly>=5.20,<7",
+]
+# Install everything
+all = [
+    "quantum-common[ibm,dwave,pennylane,mitiq,viz]",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quantum_common"]

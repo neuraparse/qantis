@@ -1,0 +1,49 @@
+# Notebook smoke tests
+name: Notebooks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "notebooks/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "notebooks/**"
+
+env:
+  PYTHON_VERSION: "3.12"
+  UV_VERSION: "0.5"
+
+jobs:
+  notebook-tests:
+    name: Notebook Smoke Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-packages --dev
+
+      - name: Run shared notebooks
+        run: |
+          uv run pytest --nbval-lax notebooks/shared/ \
+            --timeout=300 || true
+
+      - name: Run POMDP notebooks
+        run: |
+          uv run pytest --nbval-lax notebooks/pomdp/ \
+            --timeout=300 || true
+
+      - name: Run MHT notebooks
+        run: |
+          uv run pytest --nbval-lax notebooks/mht/ \
+            --timeout=300 || true

@@ -1,0 +1,96 @@
+# Default MHT experiment configuration
+# Usage: uv run python scripts/run_experiment.py --config configs/experiments/mht_default.yaml
+
+experiment:
+  name: mht_quantum_tracking
+  description: "Quantum vs Classical Multi-Hypothesis Tracking"
+  case: mht
+
+backend:
+  # Primary: D-Wave for annealing
+  backend_type: local_dwave_sim
+  use_simulator: true
+  # Secondary: IBM for QAOA (used in QAOA solver)
+  secondary_backend:
+    backend_type: local_aer
+    shots: 4096
+
+mitigation:
+  enabled: true
+  strategies:
+    - readout
+  zne_scale_factors: [1.0, 1.5, 2.0]
+
+benchmark:
+  output_dir: results/mht
+  use_sqlite: true
+  num_trials: 5
+  base_seed: 42
+  problem_sizes: [5, 8, 10, 15]  # Number of targets
+
+logging:
+  level: INFO
+  format: console
+  log_file: logs/mht_experiment.log
+
+# MHT-specific parameters
+case_parameters:
+  # Scenario selection
+  scenario: crossing  # crossing, dense_clutter, swarm_patrol
+
+  # Simulation settings
+  simulation:
+    num_steps: 50
+    dt: 1.0
+    bounds: [0, 100, 0, 100]
+
+  # QUBO formulation
+  qubo:
+    clutter_density: 1.0e-5
+    gate_threshold: 9.21  # Chi-squared 99% for 2D
+    penalty_multiplier: 1.5
+    include_missed_detection: true
+    include_false_alarm: true
+    missed_detection_cost: 5.0
+    false_alarm_cost: 3.0
+
+  # Solver configurations
+  solvers:
+    # Quantum solvers
+    annealing:
+      num_reads: 1000
+      annealing_time_us: 20.0
+      use_reverse_annealing: false
+    qaoa:
+      reps: 2
+      use_simulator: true
+    fpc_qaoa:
+      num_fixed_params: 4
+      reps: 2
+      use_warm_start: true
+    hybrid:
+      time_limit_s: 5
+
+  # Classical baselines
+  baselines:
+    - hungarian
+    - gnn
+    - jpda
+    - reid_mht
+
+  # Tracking parameters
+  tracking:
+    kalman:
+      process_noise: 1.0
+      measurement_noise: 1.0
+    track_manager:
+      confirm_hits: 3
+      confirm_window: 5
+      delete_misses: 5
+    gating:
+      gate_threshold: 9.21
+
+  # Scaling analysis
+  scaling:
+    target_counts: [5, 8, 10, 15, 20]
+    measurement_ratios: [1.5, 2.0]  # measurements per target

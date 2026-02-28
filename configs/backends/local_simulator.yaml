@@ -1,0 +1,33 @@
+# Local simulator configuration (no cloud credentials needed)
+
+backend:
+  backend_type: local_aer
+  use_simulator: true
+
+simulators:
+  # Qiskit Aer (gate-based)
+  aer:
+    method: statevector  # statevector, density_matrix, matrix_product_state
+    max_qubits: 25
+    # Noise model (optional)
+    noise_model: null  # null = ideal, or "fake_brisbane"
+    # GPU acceleration
+    use_gpu: false
+
+  # D-Wave Neal (annealing)
+  neal:
+    num_reads: 1000
+    beta_range: null  # null = auto
+    num_sweeps: 1000
+
+  # PennyLane (variational)
+  pennylane:
+    device: default.qubit
+    max_qubits: 20
+    # Alternative devices
+    # device: lightning.qubit  # C++ accelerated
+    # device: default.mixed    # Mixed state simulation
+
+execution:
+  shots: 4096
+  seed: 42  # For reproducibility
