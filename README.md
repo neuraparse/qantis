@@ -1,37 +1,10 @@
 # QANTIS
 
-**A Hardware-Validated Quantum Platform for POMDP Planning and Multi-Target Data Association**
+**Quantum Autonomous Navigation, Tracking & Intelligence System**
 
-> *Quantum Autonomous Navigation, Tracking & Intelligence System*
-> Built by **Neura Parse Ltd** — paper output: `paper/output/<YYYY-MM-DD-HHMM>/main-arxiv.pdf`
+Quantum computing platform for autonomous systems: **POMDP belief-state estimation** and **multi-hypothesis tracking (MHT)** using quantum annealing, QAOA, and amplitude estimation — with hardware validation on IBM Heron processors.
 
----
-
-## What is QANTIS?
-
-Autonomous systems under partial observability face two core bottlenecks:
-
-- **POMDP belief conditioning** on rare-evidence observations: O(P(e)⁻¹) per node classically
-- **Multi-target data association (MTDA)**: NP-hard, O(n³) per frame with exponentially growing hypothesis trees
-
-QANTIS integrates three recent quantum algorithms to address both, with the first joint hardware validation on IBM Heron processors.
-
----
-
-## Hardware Results (45-experiment pilot, IBM Heron)
-
-Validated on **ibm\_torino** (R1), **ibm\_fez** (R2), **ibm\_marrakesh** (R2):
-
-| # | Result | Key Numbers |
-|---|--------|-------------|
-| **HW1** | Grover-AA on Tiger POMDP belief oracle (ISA 18) — first on IBM Heron | P(rare obs): 0.179 → **0.907** (5.1×); Hellinger **0.0015** |
-| **HW2** | First closed-loop hybrid quantum–classical Tiger POMDP on superconducting hardware | T=4 (4 replications, all PASS); T=8, max Hellinger **0.0149** |
-| **HW3** | 4-state Tiger belief update (|S|=4, 3 qubits, ISA 162) | Hellinger **0.044** (PASS) |
-
-**NISQ feasibility boundaries established:**
-- ZNE effective at ISA ≤ 100; harmful above ISA ≳ 1,000
-- FPC-QAOA meaningful at ≤ 15 QUBO variables (ISA ≲ 450)
-- Pauli twirling + XY4 DD: +37% relative QUBO quality at p=1 (ISA 123)
+Built by **Neura Parse Ltd** as a [uv](https://docs.astral.sh/uv/) workspace monorepo.
 
 ---
 
@@ -53,9 +26,6 @@ qantis/
     quantum-common/    # backends, mitigation, config — shared library
     quantum-pomdp/     # POMDP belief estimation  (depends on quantum-common)
     quantum-mht/       # multi-hypothesis tracking (depends on quantum-common)
-  paper/
-    sections/          # LaTeX source
-    output/            # compiled PDFs: paper/output/<YYYY-MM-DD-HHMM>/main-arxiv.pdf
   configs/             # backend + experiment YAML configs
   scripts/hardware/    # IBM/D-Wave hardware run scripts
   output/hardware/     # hardware job results (JSON, timestamped)
@@ -102,7 +72,7 @@ cp .env.example .env
 
 ## Quick Start
 
-### POMDP — Closed-loop hybrid quantum–classical planning
+### POMDP — Hybrid quantum–classical planning
 
 ```python
 from quantum_pomdp.scenarios.tiger_problem import TigerProblem
@@ -153,12 +123,9 @@ Tests requiring optional SDKs are automatically skipped if not installed.
 ## Running on IBM Hardware
 
 ```bash
-# Set credentials
 export IBM_QUANTUM_TOKEN=<your-token>
 
-# Example: run FPC-QAOA MTDA on IBM Heron
 uv run python scripts/hardware/run_fpc_qaoa_ibm.py
-
 # Results saved to output/hardware/<experiment>_ibm_<timestamp>.json
 ```
 
@@ -171,24 +138,24 @@ Backend settings: `configs/backends/ibm_quantum.yaml`
 ```
 packages/
   quantum-common/src/quantum_common/
-    config/          # Pydantic schemas, YAML loader, credentials (SecretStr)
-    backends/        # IBM, D-Wave, PennyLane, Azure, local simulator
-    mitigation/      # ZNE, PEC, Pauli twirling, readout, noise pipeline
-    benchmarking/    # metrics, runner, storage, reproducibility
-    visualization/   # circuit, benchmark, style plotting
+    config/              # Pydantic schemas, YAML loader, credentials (SecretStr)
+    backends/            # IBM, D-Wave, PennyLane, Azure, local simulator
+    mitigation/          # ZNE, PEC, Pauli twirling, readout, noise pipeline
+    benchmarking/        # metrics, runner, storage, reproducibility
+    visualization/       # circuit, benchmark, style plotting
   quantum-pomdp/src/quantum_pomdp/
-    models/          # POMDPModel, BeliefState, BayesianNetwork
-    quantum_circuits/# belief update, register map, unitaries, amplitude amplification
-    algorithms/      # QBRL planner, BIQAE estimator, lookahead tree
-    scenarios/       # Tiger, 4-state Tiger, GPS-denied, grid navigation
-    pipeline/        # hybrid quantum-classical pipeline
+    models/              # POMDPModel, BeliefState, BayesianNetwork
+    quantum_circuits/    # belief update, register map, unitaries, amplitude amplification
+    algorithms/          # QBRL planner, BIQAE estimator, lookahead tree
+    scenarios/           # Tiger, 4-state Tiger, GPS-denied, grid navigation
+    pipeline/            # hybrid quantum-classical pipeline
     classical_baselines/ # POMCP, DESPOT, PBVI
   quantum-mht/src/quantum_mht/
-    formulation/     # cost matrix, QUBO builder, constraints, variables
-    solvers/         # QAOA, FPC-QAOA, annealing, hybrid, Hungarian, JPDA
-    tracking/        # Kalman, EKF, gating, track lifecycle
-    simulation/      # drone swarm, dynamics, targets, world model
-    pipeline/        # 5-stage tracking pipeline (predict→gate→associate→update→manage)
+    formulation/         # cost matrix, QUBO builder, constraints, variables
+    solvers/             # QAOA, FPC-QAOA, annealing, hybrid, Hungarian, JPDA
+    tracking/            # Kalman, EKF, gating, track lifecycle
+    simulation/          # drone swarm, dynamics, targets, world model
+    pipeline/            # 5-stage pipeline (predict→gate→associate→update→manage)
 ```
 
 ---
@@ -202,22 +169,6 @@ packages/
 | PennyLane | `[pennylane]` | Variational circuits, QAOA, multiple plugins |
 | Azure Quantum | `[ibm]` | IonQ Aria-2 (25q), Quantinuum H2 (56q) |
 | Local simulator | *(included)* | CPU — development and testing |
-
----
-
-## Paper
-
-**QANTIS: A Hardware-Validated Quantum Platform for POMDP Planning and Multi-Target Data Association**
-Neura Parse Ltd., 2026
-
-Latest compiled PDF: `paper/output/<latest-timestamp>/main-arxiv.pdf`
-
-Key references implemented:
-- QBRL (arXiv:2507.18606) — Hybrid quantum-classical POMDP planning
-- BIQAE (Quantum 10:1962, 2026) — Bayesian iterative quantum amplitude estimation
-- FPC-QAOA (arXiv:2512.21181) — Fixed-parameter-count QAOA for MTDA
-- Quantum MHT (Sci. Rep. 15:24294, 2025) — Quantum annealing with reverse warm-start
-- ZNE/PEC extensions (Quantum, Feb 2026) — Error mitigation for non-Clifford gates
 
 ---
 
