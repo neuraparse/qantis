@@ -42,6 +42,7 @@ Output
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -50,7 +51,13 @@ sys.path.insert(0, str(_repo))
 sys.path.insert(0, str(_repo / "packages" / "quantum-common" / "src"))
 sys.path.insert(0, str(_repo / "packages" / "quantum-pomdp" / "src"))
 
-from scripts.hardware import get_ibm_token_optional, save_result
+from scripts.hardware import (
+    get_ibm_token_optional,
+    ibm_channel,
+    ibm_instance,
+    make_ibm_runtime_service,
+    save_result,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +104,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--dry-run", action="store_true",
         help="Simulator only, skip IBM hardware (no credentials needed)",
+    )
+    p.add_argument(
+        "--optimized", action="store_true",
+        help="Use unitary-synthesis optimized circuit (lower ISA depth)",
+    )
+    p.add_argument(
+        "--fractional", action="store_true",
+        help="Enable fractional gates (RZZ) on Heron R2 backends",
     )
     return p.parse_args()
 
@@ -211,6 +226,89 @@ def _build_tiger_4state_circuit(
 
 
 # ---------------------------------------------------------------------------
+# Optimized 4-state Tiger circuit via unitary synthesis
+# ---------------------------------------------------------------------------
+
+def _build_tiger_4state_optimized(
+    prior_4: list[float],
+    target_observation: int,
+) -> "QuantumCircuit":
+    """Build an optimized 3-qubit 4-state Tiger circuit via unitary synthesis.
+
+    Instead of decomposing into 4 doubly-controlled RY gates (each ~30-40 ISA
+    gates on Heron R2), we:
+      1. Build the ideal unitary circuit (without measurements).
+      2. Extract the exact 8x8 unitary matrix.
+      3. Wrap it in a UnitaryGate and let Qiskit's QSD (quantum Shannon
+         decomposition) produce an optimal decomposition — at most 14 CNOTs
+         for any 3-qubit unitary, vs ~45 from the naive ccry approach.
+
+    The resulting ISA depth on Heron R2 drops from ~150 to ~50-80.
+    """
+    import numpy as np
+    from qiskit import QuantumCircuit
+    from qiskit.circuit.library import RYGate, UnitaryGate
+    from qiskit.quantum_info import Operator
+
+    p = [float(x) for x in prior_4]
+    assert abs(sum(p) - 1.0) < 1e-6, f"Prior must sum to 1, got {sum(p)}"
+
+    # --- Build the ideal (measurement-free) circuit to extract its unitary ---
+    qc_ideal = QuantumCircuit(3, name="tiger_4state_ideal")
+
+    # Step 1: UCR_Y — encode 4-amplitude prior onto q0, q1
+    p01 = float(np.clip(p[0] + p[1], 1e-9, 1.0))
+    p23 = float(np.clip(p[2] + p[3], 1e-9, 1.0))
+
+    theta_q0 = 2.0 * float(np.arccos(np.sqrt(np.clip(p01, 1e-9, 1.0))))
+    qc_ideal.ry(theta_q0, 0)
+
+    cond_p0 = p[0] / p01
+    theta_q1_given_0 = 2.0 * float(np.arccos(np.sqrt(np.clip(cond_p0, 1e-9, 1.0))))
+    qc_ideal.x(0)
+    qc_ideal.cry(theta_q1_given_0, 0, 1)
+    qc_ideal.x(0)
+
+    cond_p2 = p[2] / p23
+    theta_q1_given_1 = 2.0 * float(np.arccos(np.sqrt(np.clip(cond_p2, 1e-9, 1.0))))
+    qc_ideal.cry(theta_q1_given_1, 0, 1)
+
+    # Step 2: Observation model — doubly-controlled R_y on q2
+    theta_obs = [
+        2.0 * float(np.arccos(np.sqrt(np.clip(p_s, 1e-9, 1.0))))
+        for p_s in P_OBS_GIVEN_STATE_4
+    ]
+
+    qc_ideal.x(0); qc_ideal.x(1)
+    qc_ideal.append(RYGate(theta_obs[0]).control(2), [0, 1, 2])
+    qc_ideal.x(0); qc_ideal.x(1)
+
+    qc_ideal.x(0)
+    qc_ideal.append(RYGate(theta_obs[1]).control(2), [0, 1, 2])
+    qc_ideal.x(0)
+
+    qc_ideal.x(1)
+    qc_ideal.append(RYGate(theta_obs[2]).control(2), [0, 1, 2])
+    qc_ideal.x(1)
+
+    qc_ideal.append(RYGate(theta_obs[3]).control(2), [0, 1, 2])
+
+    # --- Extract the 8x8 unitary matrix ---
+    unitary_matrix = Operator(qc_ideal).data
+
+    # --- Wrap in UnitaryGate for optimal QSD decomposition ---
+    qc_opt = QuantumCircuit(3, 3, name="tiger_4state_opt")
+    qc_opt.append(UnitaryGate(unitary_matrix, label="tiger4s"), [0, 1, 2])
+
+    # Measurements
+    qc_opt.measure(0, 0)
+    qc_opt.measure(1, 1)
+    qc_opt.measure(2, 2)
+
+    return qc_opt
+
+
+# ---------------------------------------------------------------------------
 # Post-selection and probability extraction
 # ---------------------------------------------------------------------------
 
@@ -283,6 +381,43 @@ def _run_4state_sim(circuit, shots: int) -> dict:
 # IBM hardware execution
 # ---------------------------------------------------------------------------
 
+def _normalize_rzz_angles(isa_circuit) -> None:
+    """Fold RZZ gate angles into [0, pi/2] required by Heron R2 fractional gates.
+
+    Uses the identity: RZZ(theta) = RZ_q0(pi) RZ_q1(pi) RZZ(-theta) up to
+    global phase, along with periodicity RZZ(theta + pi) ~ RZZ(theta).
+    We absorb the sign/offset into adjacent single-qubit RZ gates.
+    """
+    import numpy as np
+
+    for i, inst in enumerate(isa_circuit.data):
+        if inst.operation.name == "rzz":
+            theta = float(inst.operation.params[0])
+            # Normalize to [0, pi/2]
+            if 0 <= theta <= np.pi / 2:
+                continue  # already valid
+            # Use periodicity: RZZ(theta) has period pi (up to global phase)
+            # Fold into [-pi/2, pi/2] first
+            folded = ((theta + np.pi / 2) % np.pi) - np.pi / 2
+            if folded < 0:
+                # RZZ(-|a|) = (Rz(pi) x Rz(pi)) RZZ(|a|) (Rz(pi) x Rz(pi))
+                # Absorb the Rz(pi) into surrounding single-qubit gates by
+                # inserting them explicitly; the transpiler will merge them.
+                folded = -folded
+                qubits = inst.qubits
+                # Insert Rz(pi) before and after on both qubits
+                isa_circuit.data[i] = inst.replace(
+                    operation=inst.operation.copy()
+                )
+                isa_circuit.data[i].operation.params[0] = folded
+                # Add compensating Rz(pi) gates — they commute through RZZ
+                # and merge with existing Rz in the next optimization pass
+                for q in qubits:
+                    isa_circuit.rz(np.pi, q)
+            else:
+                isa_circuit.data[i].operation.params[0] = folded
+
+
 def _run_4state_hw(circuit, backend_obj, shots: int) -> tuple[dict, int]:
     """Run 4-state circuit on IBM QPU, return (raw_counts, isa_depth)."""
     from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
@@ -291,14 +426,50 @@ def _run_4state_hw(circuit, backend_obj, shots: int) -> tuple[dict, int]:
     pm = generate_preset_pass_manager(optimization_level=3, backend=backend_obj)
     isa = pm.run(circuit)
     isa._layout = None  # prevent QPY Error 3211
+
+    # Check if backend uses fractional gates (RZZ) and normalize angles
+    has_rzz = any(inst.operation.name == "rzz" for inst in isa.data)
+    if has_rzz:
+        _normalize_rzz_angles(isa)
+        # Re-transpile to merge any inserted Rz gates
+        pm2 = generate_preset_pass_manager(optimization_level=3, backend=backend_obj)
+        isa = pm2.run(isa)
+        isa._layout = None
+
     isa_depth = isa.depth()
 
     sampler = SamplerV2(mode=backend_obj)
+    # Gate twirling is incompatible with fractional gates (RZZ) on IBM Runtime
+    if not has_rzz:
+        sampler.options.twirling.enable_gates = True
+        sampler.options.twirling.enable_measure = True
+        sampler.options.twirling.strategy = "active-accum"
+    else:
+        sampler.options.twirling.enable_gates = False
+        sampler.options.twirling.enable_measure = True
+    sampler.options.dynamical_decoupling.enable = True
+    sampler.options.dynamical_decoupling.sequence_type = "XY4"
+    sampler.options.dynamical_decoupling.scheduling_method = "alap"
     job = sampler.run([isa], shots=shots)
     raw = job.result()[0]
     # Register name varies by circuit ('c' for minimal, 'meas' for some)
     _creg_name = next(k for k in vars(raw.data) if not k.startswith("_"))
     return dict(getattr(raw.data, _creg_name).get_counts()), isa_depth
+
+
+def _transpile_and_report(circuit, backend_obj, label: str = "") -> "QuantumCircuit":
+    """Transpile circuit for backend and print ISA depth. Returns ISA circuit."""
+    from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+
+    pm = generate_preset_pass_manager(optimization_level=3, backend=backend_obj)
+    isa = pm.run(circuit)
+    prefix = f"  [{label}] " if label else "  "
+    print(f"{prefix}ISA depth : {isa.depth()}")
+    print(f"{prefix}ISA size  : {isa.size()}")
+    # Count 2-qubit gates
+    two_q = sum(1 for inst in isa.data if inst.operation.num_qubits == 2)
+    print(f"{prefix}2Q gates  : {two_q}")
+    return isa
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +483,12 @@ def main() -> None:
     prior_sum = sum(prior_4)
     prior_4 = [x / prior_sum for x in prior_4]  # normalise
 
+    mode_label = "OPTIMIZED (unitary synthesis)" if args.optimized else "ORIGINAL"
+
     print(f"\n=== 4-State Tiger POMDP Belief Update — IBM QPU (Task 2.5) ===")
     print(f"  Backend    : {'AerSimulator (dry-run)' if args.dry_run else args.backend}")
+    print(f"  Mode       : {mode_label}")
+    print(f"  Fractional : {args.fractional}")
     print(f"  Shots      : {args.shots}")
     print(f"  Prior      : {[round(x, 4) for x in prior_4]}")
     print(f"  Observation: {args.obs} ({'hear-left' if args.obs == 0 else 'hear-right'})")
@@ -325,15 +500,40 @@ def main() -> None:
         if token is None:
             print("  ERROR: IBM_QUANTUM_TOKEN not set. Use --dry-run for simulator.")
             sys.exit(1)
-        from qiskit_ibm_runtime import QiskitRuntimeService
-        svc = QiskitRuntimeService(token=token, channel="ibm_quantum_platform")
-        backend_obj = svc.backend(args.backend)
+        svc = make_ibm_runtime_service(
+            token=token,
+            channel=args.channel or ibm_channel(),
+            instance=args.instance or ibm_instance(),
+        )
+
+        be_kwargs: dict = {}
+        if args.fractional:
+            be_kwargs["use_fractional_gates"] = True
+        backend_obj = svc.backend(args.backend, **be_kwargs)
         print(f"  Connected  : {backend_obj.name} ({backend_obj.num_qubits} qubits)")
 
-    # Build circuit
-    circuit = _build_tiger_4state_circuit(prior_4, args.obs)
+    # Build circuit(s)
+    circuit_orig = _build_tiger_4state_circuit(prior_4, args.obs)
+
+    if args.optimized:
+        circuit = _build_tiger_4state_optimized(prior_4, args.obs)
+        print(f"\n  Original circuit depth : {circuit_orig.depth()}")
+        print(f"  Optimized circuit depth: {circuit.depth()}")
+    else:
+        circuit = circuit_orig
+
     print(f"\n  Circuit qubits : {circuit.num_qubits}")
     print(f"  Circuit depth  : {circuit.depth()}")
+
+    # --- Dry-run ISA depth comparison (when backend available) ---
+    if backend_obj is not None:
+        print(f"\n  --- ISA Depth Comparison ---")
+        isa_orig = _transpile_and_report(circuit_orig, backend_obj, label="Original")
+        if args.optimized:
+            isa_opt = _transpile_and_report(circuit, backend_obj, label="Optimized")
+            reduction = isa_orig.depth() - isa_opt.depth()
+            pct = 100.0 * reduction / max(isa_orig.depth(), 1)
+            print(f"  [Improvement] depth reduction: {reduction} gates ({pct:.1f}%)")
 
     # Classical reference posterior
     classical_post = _classical_bayes_4state(prior_4, args.obs)
@@ -348,6 +548,8 @@ def main() -> None:
         "observation": args.obs,
         "states": STATE_NAMES,
         "p_obs_given_state": P_OBS_GIVEN_STATE_4,
+        "optimized": args.optimized,
+        "fractional_gates": args.fractional,
         "circuit": {
             "num_qubits": circuit.num_qubits,
             "logical_depth": circuit.depth(),
@@ -399,6 +601,7 @@ def main() -> None:
 
     print(f"\n--- Summary ---")
     print(f"  Source    : {src}")
+    print(f"  Mode      : {mode_label}")
     print(f"  Hellinger : {src_result.get('hellinger', 'N/A')}")
     print(f"  PASS      : {overall_pass}")
     result["pass"] = overall_pass

@@ -39,6 +39,7 @@ from scripts.hardware import (
     get_ibm_token_optional,
     ibm_channel,
     ibm_instance,
+    make_ibm_runtime_service,
     save_result,
 )
 
@@ -361,16 +362,14 @@ def main() -> None:
     channel = args.channel or ibm_channel()
     instance = args.instance or ibm_instance()
 
-    from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
+    from qiskit_ibm_runtime import SamplerV2
     from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
-    if token:
-        _svc_kw: dict = {"channel": channel, "token": token}
-        if instance:
-            _svc_kw["instance"] = instance
-        _service = QiskitRuntimeService(**_svc_kw)
-    else:
-        _service = QiskitRuntimeService()
+    _service = make_ibm_runtime_service(
+        token=token,
+        channel=channel,
+        instance=instance,
+    )
 
     _backend = _service.backend(args.backend)
     print(f"\n[ibm] Connecting to {args.backend} ({_backend.num_qubits} qubits) ...")

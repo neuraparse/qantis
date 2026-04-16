@@ -160,6 +160,37 @@ def ibm_instance() -> str | None:
     return os.environ.get("IBM_QUANTUM_INSTANCE") or None
 
 
+def make_ibm_runtime_service(
+    *,
+    token: str | None = None,
+    channel: str | None = None,
+    instance: str | None = None,
+) -> Any:
+    """Create a QiskitRuntimeService using CLI args or env defaults.
+
+    The helper keeps all hardware runners on the same credential path so we can
+    switch between saved accounts and explicit ``token/channel/instance``
+    settings without patching individual scripts.
+    """
+    from qiskit_ibm_runtime import QiskitRuntimeService
+
+    resolved_token = token if token is not None else get_ibm_token_optional()
+    resolved_channel = channel or ibm_channel()
+    resolved_instance = instance if instance is not None else ibm_instance()
+
+    kwargs: dict[str, Any] = {}
+    if resolved_token:
+        kwargs["token"] = resolved_token
+    if resolved_channel:
+        kwargs["channel"] = resolved_channel
+    if resolved_instance:
+        kwargs["instance"] = resolved_instance
+
+    if kwargs:
+        return QiskitRuntimeService(**kwargs)
+    return QiskitRuntimeService()
+
+
 def require_dwave_token() -> str:
     """Return DWAVE_API_TOKEN from environment or raise SystemExit."""
     token = os.environ.get("DWAVE_API_TOKEN", "")

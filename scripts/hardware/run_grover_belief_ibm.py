@@ -51,6 +51,7 @@ from scripts.hardware import (
     get_ibm_token_optional,
     ibm_channel,
     ibm_instance,
+    make_ibm_runtime_service,
     save_result,
 )
 
@@ -207,6 +208,151 @@ def _build_grover1_circuit(
     return qc
 
 
+def _build_fpaa1_circuit(
+    prior: list[float],
+    p_obs_given_state: list[float],
+    target_obs: int,
+    phase: float | None = None,
+) -> "QuantumCircuit":
+    """Fixed-Point Amplitude Amplification (L=1) — Yoder-Low-Chuang (PRL 2014).
+
+    Replaces the standard Grover pi-phase reflections with softer phase angles,
+    guaranteeing monotonic convergence and eliminating overshoot for *any*
+    initial success probability.
+
+    Standard Grover uses Z (= P(pi)) for oracle marking and CZ (= CP(pi)) for
+    the zero-state reflection.  FPAA replaces these with P(phase) and CP(phase),
+    respectively.
+
+    For L=1 iterate the canonical choice is phase = pi/3, which gives:
+        P_final >= P_baseline  for ALL values of P_baseline in [0, 1]
+    while standard Grover can *decrease* P when P_baseline > 0.25.
+
+    Parameters
+    ----------
+    prior : list[float]
+        2-element belief state [P(tiger-left), P(tiger-right)].
+    p_obs_given_state : list[float]
+        [P(obs=0|state=0), P(obs=0|state=1)].
+    target_obs : int
+        Observation to amplify (0 or 1).
+    phase : float or None
+        Reflection phase (radians).  Default ``pi/3`` (FPAA-L1).
+        ``pi`` recovers standard Grover.
+
+    Returns
+    -------
+    QuantumCircuit
+        2-qubit circuit: q0 = state, q1 = obs.
+    """
+    from qiskit import QuantumCircuit
+
+    if phase is None:
+        phase = np.pi / 3.0
+
+    angles = _tiger_angles(prior, p_obs_given_state)
+    qc = QuantumCircuit(2, 2, name="fpaa1")
+
+    # Step 1: Oracle A
+    _oracle_gates(qc, *angles)
+
+    # Step 2: S_f — phase rotation on "good" subspace (obs=target_obs)
+    # P(phase) on q1 for target=1; X · P(phase) · X for target=0
+    if target_obs == 1:
+        qc.p(phase, 1)
+    else:
+        qc.x(1)
+        qc.p(phase, 1)
+        qc.x(1)
+
+    # Step 3: A† (un-prepare)
+    _oracle_inverse_gates(qc, *angles)
+
+    # Step 4: S₀ — reflection around |00⟩ with phase angle
+    # Standard: X₀X₁ · CZ · X₀X₁   (CZ = CP(pi))
+    # FPAA:     X₀X₁ · CP(phase) · X₀X₁
+    qc.x(0)
+    qc.x(1)
+    qc.cp(phase, 0, 1)
+    qc.x(0)
+    qc.x(1)
+
+    # Step 5: Oracle A again
+    _oracle_gates(qc, *angles)
+
+    # Step 6: Measure both qubits
+    qc.measure([0, 1], [0, 1])
+    return qc
+
+
+def _theoretical_fpaa_prob(
+    prior: list[float],
+    p_obs_given_state: list[float],
+    target_obs: int,
+    phase: float | None = None,
+) -> tuple[float, float]:
+    """Compute theoretical P(target) before and after 1 FPAA step.
+
+    For L=1 FPAA with reflection phase ``phi``, the amplified probability is
+    computed via exact unitary simulation of the 2-qubit circuit.
+
+    Returns
+    -------
+    (p_baseline, p_fpaa) : tuple[float, float]
+    """
+    # Baseline probability
+    if target_obs == 0:
+        p_e = sum(prior[s] * p_obs_given_state[s] for s in range(len(prior)))
+    else:
+        p_e = sum(prior[s] * (1.0 - p_obs_given_state[s]) for s in range(len(prior)))
+
+    if phase is None:
+        phase = np.pi / 3.0
+
+    theta = np.arcsin(np.sqrt(p_e))
+
+    # The FPAA L=1 iterate applies:  A · S_0(phi) · A† · S_f(phi) · A
+    # where S_f(phi) = I + (e^{i*phi} - 1)|good><good|
+    # and   S_0(phi) = I + (e^{i*phi} - 1)|0><0|
+    #
+    # For the 2D Grover subspace spanned by |good> and |bad>,
+    # the final success probability can be computed analytically.
+    # We use the exact formula via the Chebyshev polynomial interpretation.
+    #
+    # For single-iterate (L=1) with phase phi:
+    #   The operator in the 2D subspace is a product of two rotations
+    #   with modified angles. The amplified probability is:
+    #   p_fpaa = |<good| W |psi>|^2
+    #
+    # Rather than derive the closed form, we compute it numerically
+    # from the 2x2 unitary in the Grover subspace.
+    sin_t = np.sqrt(p_e)
+    cos_t = np.sqrt(1.0 - p_e)
+
+    # State |psi> = sin(theta)|good> + cos(theta)|bad>
+    psi = np.array([sin_t, cos_t], dtype=complex)
+
+    # S_f in {|good>, |bad>} basis: diag(e^{i*phi}, 1)
+    S_f = np.diag([np.exp(1j * phase), 1.0])
+
+    # A† · S_0(phi) · A  in the Grover subspace is a reflection about |psi>
+    # with phase phi:  I + (e^{i*phi} - 1)|psi><psi|
+    e_phi = np.exp(1j * phase)
+    psi_outer = np.outer(psi, psi.conj())
+    R_psi = np.eye(2, dtype=complex) + (e_phi - 1.0) * psi_outer
+
+    # Full operator: W = R_psi · S_f
+    W = R_psi @ S_f
+
+    # Final state
+    final = W @ psi
+
+    # P(good) = |<good|final>|^2
+    p_fpaa = float(np.abs(final[0]) ** 2)
+
+    return float(p_e), p_fpaa
+
+
 # ---------------------------------------------------------------------------
 # Analysis helpers
 # ---------------------------------------------------------------------------
@@ -332,16 +478,14 @@ def main() -> None:
     channel  = args.channel  or ibm_channel()
     instance = args.instance or ibm_instance()
 
-    from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
+    from qiskit_ibm_runtime import SamplerV2
     from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
-    if token:
-        _svc_kw: dict = {"channel": channel, "token": token}
-        if instance:
-            _svc_kw["instance"] = instance
-        service = QiskitRuntimeService(**_svc_kw)
-    else:
-        service = QiskitRuntimeService()
+    service = make_ibm_runtime_service(
+        token=token,
+        channel=channel,
+        instance=instance,
+    )
 
     backend = service.backend(args.backend)
     print(f"\n[ibm] Connected to {args.backend} ({backend.num_qubits} qubits)")

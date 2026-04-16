@@ -33,6 +33,7 @@ Academic References:
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 import logging
@@ -51,6 +52,15 @@ class BIQAEConfig:
         variant: "beta" (conjugate, recommended) or "normal" (Gaussian approx).
         k_base: Base for exponential K-schedule. Paper uses 3 (K_t = k_base^t).
         max_shots_per_stage: Incremental shots per Bayesian update within a stage.
+        prior_type: "gaussian" (default) or "beta" — selects the prior PDF
+            used to initialize the discretized grid. "gaussian" uses a truncated
+            Gaussian centered at prior_mean with width prior_std. "beta" uses a
+            Beta(beta_alpha, beta_beta) PDF on the amplitude grid.
+        beta_alpha: Alpha parameter when prior_type="beta".
+        beta_beta: Beta parameter when prior_type="beta".
+        eta: Depolarizing noise parameter in [0, 1]. The likelihood becomes
+            P(success|theta,k,eta) = eta*sin^2((2k+1)*theta) + (1-eta)/2
+            per Ramoa & Santos (Quantum 9:1856, 2025). Default 1.0 (noiseless).
     """
     variant: Literal["beta", "normal"] = "beta"
     max_iterations: int = 10
@@ -60,6 +70,10 @@ class BIQAEConfig:
     shots_per_iteration: int = 100
     k_base: int = 3  # Base-3 exponential K-schedule per paper
     seed: int = 42
+    prior_type: str = "gaussian"
+    beta_alpha: float = 1.0
+    beta_beta: float = 1.0
+    eta: float = 1.0  # Depolarizing noise parameter (Ramoa & Santos, Quantum 9:1856, 2025)
 
 
 @dataclass
@@ -111,11 +125,22 @@ class BIQAEEstimator:
         theta_grid = np.linspace(0.001, np.pi / 2 - 0.001, grid_size)
         amplitude_grid = np.sin(theta_grid) ** 2
 
-        # Prior: truncated Gaussian
-        prior = np.exp(
-            -0.5 * ((amplitude_grid - self.config.prior_mean) / self.config.prior_std) ** 2
-        )
-        prior /= prior.sum()
+        if self.config.prior_type == "beta":
+            from scipy.stats import beta as beta_dist
+            prior = beta_dist.pdf(
+                amplitude_grid, self.config.beta_alpha, self.config.beta_beta,
+            )
+            total = prior.sum()
+            if total > 0:
+                prior /= total
+            else:
+                prior = np.ones(grid_size) / grid_size
+        else:
+            # Prior: truncated Gaussian (default)
+            prior = np.exp(
+                -0.5 * ((amplitude_grid - self.config.prior_mean) / self.config.prior_std) ** 2
+            )
+            prior /= prior.sum()
         posterior = prior.copy()
 
         total_shots = 0
@@ -223,16 +248,19 @@ class BIQAEEstimator:
         """Update posterior using Bayes' rule.
 
         P(theta | data) proportional to P(data | theta) * P(theta)
-        where P(success | theta, k) = sin^2((2k+1)*theta)
+        where the noise-aware likelihood is:
+        P(success|theta,k,eta) = eta*sin^2((2k+1)*theta) + (1-eta)/2
 
-        Per Li et al., Quantum 10:1962 (2026), Sec II-III. The likelihood
-        derives from Brassard et al. (2002) Grover amplitude estimation.
-
-        Note: Ramoa & Santos (Quantum 9:1856, 2025, arXiv:2412.04394)
-        extend this with a noise parameter eta for NISQ devices:
-        P(success|theta,k,eta) = eta*sin^2((2k+1)*theta) + (1-eta)/2.
+        Per Ramoa & Santos (Quantum 9:1856, 2025, arXiv:2412.04394).
+        When eta=1.0 this reduces to the standard noiseless likelihood
+        P(success|theta,k) = sin^2((2k+1)*theta) from
+        Li et al., Quantum 10:1962 (2026) / Brassard et al. (2002).
         """
-        prob_success = np.sin((2 * k + 1) * theta_grid) ** 2
+        # Noise-aware likelihood (Ramoa & Santos, Quantum 9:1856, 2025):
+        # P(success|theta,k,eta) = eta * sin^2((2k+1)*theta) + (1-eta)/2
+        # When eta=1.0 this reduces to the standard noiseless likelihood.
+        eta = self.config.eta
+        prob_success = eta * np.sin((2 * k + 1) * theta_grid) ** 2 + (1 - eta) / 2
         prob_success = np.clip(prob_success, 1e-10, 1 - 1e-10)
 
         # Binomial likelihood (constant comb(total, successes) cancels in normalization)
@@ -278,3 +306,213 @@ class BIQAEEstimator:
                 if bitstring[-1] == '1':
                     success_count += count
         return success_count
+
+
+# ---------------------------------------------------------------------------
+# Two-phase adaptive prior calibration (QANTIS-2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CalibratedBIQAEConfig:
+    """Configuration for the two-phase calibrated BIQAE protocol.
+
+    Phase 1 performs a coarse scan at zero Grover depth to obtain a rough
+    amplitude estimate, then selects a boundary-aware Beta prior for Phase 2
+    (full BIQAE).
+
+    Args:
+        n_coarse: Number of shots for the Phase 1 coarse scan.
+        boundary_threshold: Distance from 0 or 1 below which a boundary-aware
+            prior is selected instead of the default Jeffreys prior.
+        biqae_config: Base BIQAE configuration for Phase 2. The prior_type,
+            beta_alpha, and beta_beta fields will be overwritten by the
+            calibration logic.
+    """
+    n_coarse: int = 200
+    boundary_threshold: float = 0.1
+    biqae_config: BIQAEConfig = field(default_factory=BIQAEConfig)
+
+
+@dataclass
+class CalibratedBIQAEResult:
+    """Result from the two-phase calibrated BIQAE protocol."""
+    phase1_estimate: float
+    phase1_shots: int
+    regime: str  # "near_zero", "near_one", "interior"
+    prior_alpha: float
+    prior_beta: float
+    biqae_result: BIQAEResult
+    total_shots: int
+    eta_estimated: float = 1.0  # Auto-estimated depolarizing noise parameter
+
+
+class CalibratedBIQAEEstimator:
+    """Two-phase adaptive BIQAE with boundary-aware Beta prior calibration.
+
+    Phase 1 (coarse scan): Run the oracle circuit at depth k=0 (no Grover
+    iterations) for ``n_coarse`` shots to obtain a rough amplitude estimate.
+
+    Prior selection: Based on proximity to the boundaries 0 and 1, select
+    a Beta prior that concentrates mass appropriately:
+    - Near zero (a_hat < delta):  Beta(1, ceil(1/a_hat)) — mass near 0
+    - Near one  (a_hat > 1-delta): Beta(ceil(1/(1-a_hat)), 1) — mass near 1
+    - Interior:  Beta(0.5, 0.5) — Jeffreys non-informative prior
+
+    Phase 2: Run full BIQAE with the calibrated Beta prior.
+    """
+
+    def __init__(self, config: CalibratedBIQAEConfig | None = None) -> None:
+        self.config = config or CalibratedBIQAEConfig()
+
+    def estimate(
+        self,
+        oracle_circuit: Any,
+        grover_operator: Any | None = None,
+        executor: Any | None = None,
+    ) -> CalibratedBIQAEResult:
+        """Run the two-phase calibrated BIQAE protocol.
+
+        Args:
+            oracle_circuit: The quantum circuit encoding the problem.
+            grover_operator: Optional Grover operator.
+            executor: Backend executor function. If None, uses classical simulation.
+
+        Returns:
+            CalibratedBIQAEResult with phase 1 diagnostics and full BIQAE result.
+        """
+        # Phase 1: coarse scan at m=0 (also estimates eta if not provided)
+        a_hat_0, eta_estimated = self._coarse_scan(oracle_circuit, executor)
+
+        # Select Beta prior based on coarse estimate
+        alpha, beta_param, regime = self._select_prior(a_hat_0)
+
+        # Phase 2: BIQAE with calibrated Beta prior and noise parameter
+        phase2_config = BIQAEConfig(
+            variant=self.config.biqae_config.variant,
+            max_iterations=self.config.biqae_config.max_iterations,
+            confidence_level=self.config.biqae_config.confidence_level,
+            prior_mean=self.config.biqae_config.prior_mean,
+            prior_std=self.config.biqae_config.prior_std,
+            shots_per_iteration=self.config.biqae_config.shots_per_iteration,
+            k_base=self.config.biqae_config.k_base,
+            seed=self.config.biqae_config.seed,
+            prior_type="beta",
+            beta_alpha=alpha,
+            beta_beta=beta_param,
+            eta=eta_estimated,
+        )
+
+        estimator = BIQAEEstimator(phase2_config)
+        biqae_result = estimator.estimate(oracle_circuit, grover_operator, executor)
+
+        total_shots = self.config.n_coarse + biqae_result.total_shots
+
+        return CalibratedBIQAEResult(
+            phase1_estimate=a_hat_0,
+            phase1_shots=self.config.n_coarse,
+            regime=regime,
+            prior_alpha=alpha,
+            prior_beta=beta_param,
+            biqae_result=biqae_result,
+            total_shots=total_shots,
+            eta_estimated=eta_estimated,
+        )
+
+    def _select_prior(
+        self, a_hat_0: float,
+    ) -> tuple[float, float, str]:
+        """Select Beta prior parameters based on Phase 1 coarse estimate.
+
+        Returns:
+            (alpha, beta, regime) tuple.
+        """
+        delta = self.config.boundary_threshold
+
+        if a_hat_0 <= delta:
+            # Near-zero: concentrate mass near 0 with Beta(1, large)
+            beta_param = min(
+                float(math.ceil(1.0 / max(a_hat_0, 1e-6))), 100.0,
+            )
+            return 1.0, beta_param, "near_zero"
+        elif a_hat_0 >= 1.0 - delta:
+            # Near-one: concentrate mass near 1 with Beta(large, 1)
+            alpha = min(
+                float(math.ceil(1.0 / max(1.0 - a_hat_0, 1e-6))), 100.0,
+            )
+            return alpha, 1.0, "near_one"
+        else:
+            # Interior: Jeffreys non-informative prior
+            return 0.5, 0.5, "interior"
+
+    def _coarse_scan(
+        self,
+        oracle_circuit: Any,
+        executor: Any | None,
+    ) -> tuple[float, float]:
+        """Run oracle at depth k=0 (no Grover iterations) to get a rough estimate.
+
+        At k=0 the success probability is simply the amplitude a, so the
+        maximum-likelihood estimate is successes / n_coarse.
+
+        Also estimates the depolarizing noise parameter eta if not explicitly
+        set in the base BIQAE config. Under depolarizing noise the observed
+        frequency at k=0 is:
+            P_obs = eta * a + (1-eta)/2
+        so:
+            eta = (2*a_hat - 1) / (2*a_approx - 1)  when a_approx != 0.5
+        Clamped to [0.5, 1.0] for robustness (Ramoa & Santos, Quantum 9:1856).
+
+        Returns:
+            (a_hat, eta) -- coarse amplitude estimate and noise parameter.
+        """
+        n = self.config.n_coarse
+
+        if executor is not None:
+            # Real quantum execution at k=0: just measure the oracle output
+            from qiskit import QuantumCircuit
+
+            qc = oracle_circuit.copy()
+            qc.measure_all()
+
+            result = executor(qc, shots=n)
+            success_count = 0
+            if isinstance(result, dict):
+                for bitstring, count in result.items():
+                    if bitstring[-1] == '1':
+                        success_count += count
+            a_hat = success_count / n
+        else:
+            # Classical simulation: use the BIQAE config's prior_mean as the
+            # true amplitude (same convention as BIQAEEstimator's classical mode)
+            rng = np.random.default_rng(self.config.biqae_config.seed)
+            a_true = self.config.biqae_config.prior_mean
+            success_count = int(rng.binomial(n, a_true))
+            a_hat = success_count / n
+
+        a_hat = float(np.clip(a_hat, 0.0, 1.0))
+
+        # Determine eta: use explicit value if set (not default 1.0),
+        # otherwise auto-estimate from coarse scan.
+        cfg_eta = self.config.biqae_config.eta
+        if cfg_eta < 1.0:
+            # User provided an explicit eta — use it as-is
+            eta = cfg_eta
+        else:
+            # Auto-estimate eta from Phase 1 coarse scan.
+            # At k=0: P_obs = eta * a + (1-eta)/2
+            # Use prior_mean as a_approx (best available estimate of true a).
+            a_approx = self.config.biqae_config.prior_mean
+            denom = 2.0 * a_approx - 1.0
+            if abs(denom) < 0.05:
+                # a_approx ~ 0.5: eta is unidentifiable from k=0 data, default 1.0
+                eta = 1.0
+            else:
+                eta = (2.0 * a_hat - 1.0) / denom
+                eta = float(np.clip(eta, 0.5, 1.0))
+
+        logger.debug(
+            "Coarse scan: a_hat=%.4f, eta=%.4f (cfg_eta=%.4f)", a_hat, eta, cfg_eta,
+        )
+
+        return a_hat, eta

@@ -64,15 +64,23 @@ sys.path.insert(0, str(_repo / "packages" / "quantum-pomdp" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_tiger_4state_ibm import (
     _build_tiger_4state_circuit,
+    _build_tiger_4state_optimized,
     _post_select_4state,
     _counts_to_probs,
     _classical_bayes_4state,
     _hellinger,
     _run_4state_sim,
+    _run_4state_hw,
     STATE_NAMES,
 )
 
-from scripts.hardware import get_ibm_token_optional, save_result
+from scripts.hardware import (
+    get_ibm_token_optional,
+    ibm_channel,
+    ibm_instance,
+    make_ibm_runtime_service,
+    save_result,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +123,10 @@ def _parse_args() -> argparse.Namespace:
         "--dry-run", action="store_true",
         help="Simulator only, no IBM credentials needed",
     )
+    p.add_argument(
+        "--optimized", action="store_true",
+        help="Use the optimized unitary-synthesis 4-state circuit family",
+    )
     return p.parse_args()
 
 
@@ -141,9 +153,13 @@ def _run_one(
     shots: int,
     backend_obj,
     dry_run: bool,
+    optimized: bool,
 ) -> dict:
     """Run one prior × obs combination. Return result dict."""
-    circuit = _build_tiger_4state_circuit(prior, obs)
+    from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+
+    circuit_orig = _build_tiger_4state_circuit(prior, obs)
+    circuit = _build_tiger_4state_optimized(prior, obs) if optimized else circuit_orig
     classical_post = _classical_bayes_4state(prior, obs)
     kl_prior_post = _kl_divergence(classical_post, prior)
 
@@ -161,6 +177,7 @@ def _run_one(
         "circuit": {
             "num_qubits": circuit.num_qubits,
             "logical_depth": circuit.depth(),
+            "optimized": optimized,
         },
         "simulator": {
             "posterior": sim_probs,
@@ -170,30 +187,39 @@ def _run_one(
     }
 
     if not dry_run and backend_obj is not None:
-        from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
-        from qiskit_ibm_runtime import SamplerV2
-
         pm = generate_preset_pass_manager(optimization_level=3, backend=backend_obj)
         isa = pm.run(circuit)
         isa._layout = None  # prevent QPY Error 3211
         isa_depth = isa.depth()
+        isa_size = isa.size()
+        isa_two_q = sum(1 for inst in isa.data if inst.operation.num_qubits == 2)
 
-        sampler = SamplerV2(mode=backend_obj)
-        job = sampler.run([isa], shots=shots)
-        raw = job.result()[0]
-        _creg_name = next(k for k in vars(raw.data) if not k.startswith("_"))
-        hw_raw = dict(getattr(raw.data, _creg_name).get_counts())
+        hw_raw, _ = _run_4state_hw(circuit, backend_obj, shots=shots)
         hw_ps = _post_select_4state(hw_raw, obs)
         hw_probs = _counts_to_probs(hw_ps, n_states=4)
         hw_hell = _hellinger(hw_probs, classical_post)
 
         entry["hardware"] = {
             "isa_depth": isa_depth,
+            "isa_size": isa_size,
+            "two_qubit_gates": isa_two_q,
             "posterior": hw_probs,
             "hellinger": round(hw_hell, 6),
             "pass": hw_hell < HELLINGER_THRESHOLD,
         }
         entry["circuit"]["isa_depth"] = isa_depth
+        entry["circuit"]["isa_size"] = isa_size
+        entry["circuit"]["two_qubit_gates"] = isa_two_q
+
+        if optimized:
+            isa_orig = pm.run(circuit_orig)
+            isa_orig._layout = None
+            entry["circuit"]["original_logical_depth"] = circuit_orig.depth()
+            entry["circuit"]["original_isa_depth"] = isa_orig.depth()
+            entry["circuit"]["original_isa_size"] = isa_orig.size()
+            entry["circuit"]["original_two_qubit_gates"] = sum(
+                1 for inst in isa_orig.data if inst.operation.num_qubits == 2
+            )
 
     return entry
 
@@ -207,6 +233,7 @@ def main() -> None:
 
     print(f"\n=== 4-State Tiger Multi-Prior Sweep — IBM QPU ===")
     print(f"  Backend : {'AerSimulator (dry-run)' if args.dry_run else args.backend}")
+    print(f"  Mode    : {'OPTIMIZED' if args.optimized else 'ORIGINAL'}")
     print(f"  Shots   : {args.shots}")
     print(f"  Runs    : {len(PRIORS)} priors × {len(OBSERVATIONS)} obs = "
           f"{len(PRIORS) * len(OBSERVATIONS)} circuits")
@@ -219,9 +246,9 @@ def main() -> None:
         if token is None:
             print("  ERROR: IBM_QUANTUM_TOKEN not set. Use --dry-run for simulator.")
             sys.exit(1)
-        from qiskit_ibm_runtime import QiskitRuntimeService
-        channel = args.channel or "ibm_quantum_platform"
-        svc = QiskitRuntimeService(token=token, channel=channel)
+        channel = args.channel or ibm_channel()
+        instance = args.instance if args.instance is not None else ibm_instance()
+        svc = make_ibm_runtime_service(token=token, channel=channel, instance=instance)
         backend_obj = svc.backend(args.backend)
         print(f"  Connected: {backend_obj.name} ({backend_obj.num_qubits} qubits)\n")
 
@@ -233,13 +260,31 @@ def main() -> None:
             label = f"{prior_name}, obs={obs} ({obs_name})"
             print(f"  [{len(all_runs)+1}/6] Prior: {prior_name}  Obs: {obs} ({obs_name})")
 
-            entry = _run_one(
-                prior=prior,
-                obs=obs,
-                shots=args.shots,
-                backend_obj=backend_obj,
-                dry_run=args.dry_run,
-            )
+            try:
+                entry = _run_one(
+                    prior=prior,
+                    obs=obs,
+                    shots=args.shots,
+                    backend_obj=backend_obj,
+                    dry_run=args.dry_run,
+                    optimized=args.optimized,
+                )
+            except Exception as exc:
+                partial = {
+                    "task_ids": ["2.5-multiprior"],
+                    "backend": args.backend if not args.dry_run else "aer_simulator",
+                    "shots": args.shots,
+                    "optimized": args.optimized,
+                    "hellinger_threshold": HELLINGER_THRESHOLD,
+                    "runs": all_runs,
+                    "failure": {
+                        "prior_name": prior_name,
+                        "obs_name": obs_name,
+                        "message": str(exc),
+                    },
+                }
+                save_result("tiger_4state_multiprior_ibm_partial", partial)
+                raise
             entry["prior_name"] = prior_name
             entry["obs_name"] = obs_name
             all_runs.append(entry)
@@ -268,6 +313,12 @@ def main() -> None:
                 hw_res = entry.get("hardware", {})
                 if hw_res:
                     print(f"    ISA depth          : {hw_res.get('isa_depth', 'N/A')}")
+                    if args.optimized:
+                        orig_depth = entry.get("circuit", {}).get("original_isa_depth", "N/A")
+                        two_q = hw_res.get("two_qubit_gates", "N/A")
+                        orig_two_q = entry.get("circuit", {}).get("original_two_qubit_gates", "N/A")
+                        print(f"    ISA compare        : {orig_depth} -> {hw_res.get('isa_depth', 'N/A')}, "
+                              f"2Q {orig_two_q} -> {two_q}")
                     print(f"    HW Hellinger       : {hw_res['hellinger']:.4f}  "
                           f"({'PASS' if hw_res['pass'] else 'FAIL (> 0.05)'})")
             print()
@@ -309,6 +360,7 @@ def main() -> None:
         "task_ids": ["2.5-multiprior"],
         "backend": args.backend if not args.dry_run else "aer_simulator",
         "shots": args.shots,
+        "optimized": args.optimized,
         "hellinger_threshold": HELLINGER_THRESHOLD,
         "runs": all_runs,
         "summary": {

@@ -45,7 +45,68 @@ sys.path.insert(0, str(_repo))
 sys.path.insert(0, str(_repo / "packages" / "quantum-common" / "src"))
 sys.path.insert(0, str(_repo / "packages" / "quantum-pomdp" / "src"))
 
-from scripts.hardware import ibm_channel, ibm_instance, get_ibm_token_optional, save_result
+from scripts.hardware import (
+    get_ibm_token_optional,
+    ibm_channel,
+    ibm_instance,
+    make_ibm_runtime_service,
+    save_result,
+)
+
+
+def _ci_width(ci: tuple[float, float] | list[float]) -> float:
+    return float(ci[1] - ci[0])
+
+
+def _baseline_prior_summary(args: argparse.Namespace) -> dict:
+    return {
+        "kind": "baseline",
+        "prior_mean": args.prior_mean if args.prior_mean is not None else 0.5,
+        "prior_std": args.prior_std if args.prior_std is not None else 0.25,
+    }
+
+
+def _build_paper_summary(
+    *,
+    args: argparse.Namespace,
+    backend: str,
+    section: str,
+    estimate: float,
+    confidence_interval: tuple[float, float] | list[float],
+    num_iterations: int,
+    total_shots: int,
+    error: float,
+    ci_contains_true: bool,
+    calibration: dict | None = None,
+) -> dict:
+    phase1_shots = 0
+    total_shots_used = int(total_shots)
+    if calibration is not None:
+        phase1_shots = int(calibration.get("phase1_shots", 0))
+        total_shots_used = int(calibration.get("total_shots", total_shots))
+
+    summary = {
+        "section": section,
+        "backend": backend,
+        "amplitude": args.amplitude,
+        "calibrated": bool(args.calibrated),
+        "phase1_shots": phase1_shots,
+        "phase2_shots": int(total_shots),
+        "total_shots_used": total_shots_used,
+        "shots_per_iteration": args.shots_per_iter,
+        "estimate": float(estimate),
+        "absolute_error": float(error),
+        "confidence_interval": list(confidence_interval),
+        "ci_width": _ci_width(confidence_interval),
+        "ci_contains_true": bool(ci_contains_true),
+        "iterations": int(num_iterations),
+        "k_base": int(args.k_base),
+        "prior": calibration if calibration is not None else _baseline_prior_summary(args),
+    }
+    if args.calibrated:
+        summary["coarse_scan_shots"] = phase1_shots
+        summary["boundary_threshold"] = float(args.boundary_threshold)
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +158,26 @@ def _parse_args() -> argparse.Namespace:
         "--num-qubits", type=int, choices=[1, 2], default=1,
         help="Oracle dimensionality: 1 (standard 1-qubit R_y) or 2 (separable "
              "2-qubit, targets |11>, P(|11>)=a_true). Default: 1.",
+    )
+    p.add_argument(
+        "--calibrated", action="store_true",
+        help="Enable two-phase adaptive prior calibration (CalibratedBIQAEEstimator). "
+             "Phase 1 runs a coarse scan at k=0, then selects a boundary-aware "
+             "Beta prior for Phase 2 BIQAE.",
+    )
+    p.add_argument(
+        "--n-coarse", type=int, default=200,
+        help="Phase 1 coarse scan shots (default: 200). Only used with --calibrated.",
+    )
+    p.add_argument(
+        "--boundary-threshold", type=float, default=0.1,
+        help="Boundary proximity threshold delta (default: 0.1). Only used with --calibrated.",
+    )
+    p.add_argument(
+        "--eta", type=float, default=None,
+        help="Depolarizing noise parameter eta in [0,1] (Ramoa & Santos, 2025). "
+             "Default: None = auto-estimate from Phase 1 coarse scan when "
+             "--calibrated is used, or 1.0 (noiseless) otherwise.",
     )
     return p.parse_args()
 
@@ -204,6 +285,12 @@ def _make_ibm_executor(backend_obj):
         isa._layout = None
 
         sampler = SamplerV2(mode=backend_obj)
+        sampler.options.twirling.enable_gates = True
+        sampler.options.twirling.enable_measure = True
+        sampler.options.twirling.strategy = "active-accum"
+        sampler.options.dynamical_decoupling.enable = True
+        sampler.options.dynamical_decoupling.sequence_type = "XY4"
+        sampler.options.dynamical_decoupling.scheduling_method = "alap"
         job = sampler.run([isa], shots=shots)
         raw = job.result()[0]
         return dict(raw.data.meas.get_counts())
@@ -227,6 +314,12 @@ def _make_ibm_executor_2qubit(backend_obj):
         isa = pm.run(qc)
         isa._layout = None
         sampler = SamplerV2(mode=backend_obj)
+        sampler.options.twirling.enable_gates = True
+        sampler.options.twirling.enable_measure = True
+        sampler.options.twirling.strategy = "active-accum"
+        sampler.options.dynamical_decoupling.enable = True
+        sampler.options.dynamical_decoupling.sequence_type = "XY4"
+        sampler.options.dynamical_decoupling.scheduling_method = "alap"
         job = sampler.run([isa], shots=shots)
         raw = job.result()[0]
         raw_counts = dict(raw.data.meas.get_counts())
@@ -256,6 +349,11 @@ def main() -> None:
     print(f"  Backend: {'AerSimulator (dry-run)' if args.dry_run else args.backend}")
     print(f"  Shots/iter: {args.shots_per_iter}, Max iterations: {args.max_iterations}")
     print(f"  K-schedule: K_t = {args.k_base}^t  (base-3 per Li et al. 2026)")
+    if args.eta is not None:
+        print(f"  Noise eta: {args.eta} (user-provided)")
+    else:
+        print(f"  Noise eta: 1.0 (noiseless default; use --eta or --calibrated for auto)")
+
 
     if is_2qubit:
         oracle, grover, theta_true = _build_2qubit_oracle_and_grover(args.amplitude)
@@ -268,7 +366,10 @@ def main() -> None:
               f"({np.degrees(theta_true):.2f} deg),  sin2(theta) = {np.sin(theta_true)**2:.4f}")
     print(f"  Oracle depth: {oracle.depth()}, Grover depth: {grover.depth()}")
 
-    from quantum_pomdp.algorithms.biqae_estimator import BIQAEConfig, BIQAEEstimator
+    from quantum_pomdp.algorithms.biqae_estimator import (
+        BIQAEConfig, BIQAEEstimator,
+        CalibratedBIQAEConfig, CalibratedBIQAEEstimator,
+    )
 
     config_kwargs: dict = dict(
         variant="beta",
@@ -281,7 +382,23 @@ def main() -> None:
         config_kwargs["prior_mean"] = args.prior_mean
     if args.prior_std is not None:
         config_kwargs["prior_std"] = args.prior_std
+    if args.eta is not None:
+        config_kwargs["eta"] = args.eta
     config = BIQAEConfig(**config_kwargs)
+
+    # Build calibrated config if requested
+    calibrated_config: CalibratedBIQAEConfig | None = None
+    if args.calibrated:
+        calibrated_config = CalibratedBIQAEConfig(
+            n_coarse=args.n_coarse,
+            boundary_threshold=args.boundary_threshold,
+            biqae_config=config,
+        )
+        print(f"  Calibrated: Phase 1 n_coarse={args.n_coarse}, delta={args.boundary_threshold}")
+        if args.eta is not None:
+            print(f"  Noise: eta={args.eta} (user-provided)")
+        else:
+            print(f"  Noise: eta will be auto-estimated from Phase 1 coarse scan")
 
     oracle_desc = (
         "2-qubit R_y(2t)xR_y(2t), Grover=CZ·Ry(-2t)^2·X^2·CZ·X^2·Ry(2t)^2, success=|11>"
@@ -291,6 +408,8 @@ def main() -> None:
     result_data: dict = {
         "task_ids": ["2.3"],
         "backend": "aer_simulator" if args.dry_run else args.backend,
+        "channel": args.channel or ibm_channel(),
+        "instance": args.instance or ibm_instance(),
         "a_true": args.amplitude,
         "theta_true": float(theta_true),
         "shots_per_iteration": args.shots_per_iter,
@@ -299,14 +418,37 @@ def main() -> None:
         "num_qubits": args.num_qubits,
         "oracle_qubits": args.num_qubits,
         "oracle": oracle_desc,
+        "eta": args.eta,  # None means auto-estimated
+        "calibrated": bool(args.calibrated),
+        "n_coarse": args.n_coarse if args.calibrated else None,
+        "boundary_threshold": args.boundary_threshold if args.calibrated else None,
     }
 
     # ------------------------------------------------------------------
     # Classical simulation baseline (no executor ? BIQAE internal sim)
     # ------------------------------------------------------------------
     print("\n[simulator] BIQAE with internal classical simulator ...")
-    estimator_sim = BIQAEEstimator(config)
-    biqae_sim = estimator_sim.estimate(oracle, grover, executor=None)
+    if calibrated_config is not None:
+        cal_sim = CalibratedBIQAEEstimator(calibrated_config)
+        cal_result_sim = cal_sim.estimate(oracle, grover, executor=None)
+        biqae_sim = cal_result_sim.biqae_result
+        print(f"  [calibrated] Phase 1 estimate: {cal_result_sim.phase1_estimate:.4f}, "
+              f"regime: {cal_result_sim.regime}")
+        print(f"  [calibrated] Prior: Beta({cal_result_sim.prior_alpha:.2f}, "
+              f"{cal_result_sim.prior_beta:.2f})")
+        print(f"  [calibrated] eta (noise): {cal_result_sim.eta_estimated:.4f}")
+        result_data["calibration_simulator"] = {
+            "phase1_estimate": cal_result_sim.phase1_estimate,
+            "phase1_shots": cal_result_sim.phase1_shots,
+            "regime": cal_result_sim.regime,
+            "prior_alpha": cal_result_sim.prior_alpha,
+            "prior_beta": cal_result_sim.prior_beta,
+            "total_shots": cal_result_sim.total_shots,
+            "eta_estimated": cal_result_sim.eta_estimated,
+        }
+    else:
+        estimator_sim = BIQAEEstimator(config)
+        biqae_sim = estimator_sim.estimate(oracle, grover, executor=None)
 
     sim_error = abs(biqae_sim.amplitude_estimate - args.amplitude)
     sim_ci_contains = (
@@ -329,6 +471,18 @@ def main() -> None:
         "error": float(sim_error),
         "ci_contains_true": sim_ci_contains,
     }
+    result_data["paper_summary_simulator"] = _build_paper_summary(
+        args=args,
+        backend=result_data["backend"],
+        section="simulator",
+        estimate=biqae_sim.amplitude_estimate,
+        confidence_interval=biqae_sim.confidence_interval,
+        num_iterations=biqae_sim.num_iterations,
+        total_shots=biqae_sim.total_shots,
+        error=sim_error,
+        ci_contains_true=sim_ci_contains,
+        calibration=result_data.get("calibration_simulator"),
+    )
 
     # Dry-run pass: CI must contain the true value (algorithm ran, CI is calibrated).
     # Note: internal sim uses posterior mean to generate samples (self-referential),
@@ -355,13 +509,11 @@ def main() -> None:
         print(f"[error] qiskit-ibm-runtime not installed: {exc}")
         raise SystemExit(1)
 
-    if token:
-        kwargs: dict = {"channel": channel, "token": token}
-        if instance:
-            kwargs["instance"] = instance
-        service = QiskitRuntimeService(**kwargs)
-    else:
-        service = QiskitRuntimeService()  # saved account
+    service = make_ibm_runtime_service(
+        token=token,
+        channel=channel,
+        instance=instance,
+    )
     backend_obj = service.backend(args.backend)
     print(f"\n[ibm] Connected to {args.backend}  ({backend_obj.num_qubits} qubits)")
 
@@ -397,8 +549,27 @@ def main() -> None:
     print(f"\n[ibm] Running BIQAE on hardware  "
           f"({args.max_iterations} iterations × {args.shots_per_iter} shots) ...")
     try:
-        estimator_hw = BIQAEEstimator(config)
-        biqae_hw = estimator_hw.estimate(oracle, grover, executor=ibm_executor)
+        if calibrated_config is not None:
+            cal_hw = CalibratedBIQAEEstimator(calibrated_config)
+            cal_result_hw = cal_hw.estimate(oracle, grover, executor=ibm_executor)
+            biqae_hw = cal_result_hw.biqae_result
+            print(f"  [calibrated] Phase 1 estimate: {cal_result_hw.phase1_estimate:.4f}, "
+                  f"regime: {cal_result_hw.regime}")
+            print(f"  [calibrated] Prior: Beta({cal_result_hw.prior_alpha:.2f}, "
+                  f"{cal_result_hw.prior_beta:.2f})")
+            print(f"  [calibrated] eta (noise): {cal_result_hw.eta_estimated:.4f}")
+            result_data["calibration_hardware"] = {
+                "phase1_estimate": cal_result_hw.phase1_estimate,
+                "phase1_shots": cal_result_hw.phase1_shots,
+                "regime": cal_result_hw.regime,
+                "prior_alpha": cal_result_hw.prior_alpha,
+                "prior_beta": cal_result_hw.prior_beta,
+                "total_shots": cal_result_hw.total_shots,
+                "eta_estimated": cal_result_hw.eta_estimated,
+            }
+        else:
+            estimator_hw = BIQAEEstimator(config)
+            biqae_hw = estimator_hw.estimate(oracle, grover, executor=ibm_executor)
 
         hw_error = abs(biqae_hw.amplitude_estimate - args.amplitude)
         hw_ci_contains = (
@@ -422,6 +593,18 @@ def main() -> None:
             "error": float(hw_error),
             "ci_contains_true": hw_ci_contains,
         }
+        result_data["paper_summary_hardware"] = _build_paper_summary(
+            args=args,
+            backend=args.backend,
+            section="hardware",
+            estimate=biqae_hw.amplitude_estimate,
+            confidence_interval=biqae_hw.confidence_interval,
+            num_iterations=biqae_hw.num_iterations,
+            total_shots=biqae_hw.total_shots,
+            error=hw_error,
+            ci_contains_true=hw_ci_contains,
+            calibration=result_data.get("calibration_hardware"),
+        )
         result_data["hw_vs_sim_error_delta"] = float(hw_error - sim_error)
         result_data["hw_ci_contains_true"] = hw_ci_contains
 
@@ -437,6 +620,13 @@ def main() -> None:
     except Exception as exc:
         print(f"  [error] IBM BIQAE failed: {exc}")
         result_data["hardware"] = {"error": str(exc)}
+        result_data["paper_summary_hardware"] = {
+            "section": "hardware",
+            "backend": args.backend,
+            "amplitude": args.amplitude,
+            "calibrated": bool(args.calibrated),
+            "error": str(exc),
+        }
         result_data["pass"] = False
         result_data["notes"] = f"Hardware execution failed: {exc}"
 
