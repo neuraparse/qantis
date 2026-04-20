@@ -24,6 +24,16 @@ uv.lock
 # Environment / Secrets
 .env
 .env.local
+*.key
+*.pem
+*.pfx
+*.p12
+credentials.json
+service-account*.json
+secrets.yaml
+secrets.yml
+*.bak
+*.orig
 
 # Quantum cache
 .quantum_cache/

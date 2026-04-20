@@ -45,7 +45,7 @@ Heavyweight quantum SDKs (Qiskit, D-Wave Ocean, PennyLane, Mitiq) are **optional
 ## Installation
 
 ```bash
-git clone <repo-url> qantis
+git clone https://github.com/neuraparse/qantis.git
 cd qantis
 uv sync
 ```

@@ -1,21 +1,10 @@
-"""Q-CTRL style IMU + quantum sensor fusion.
+"""IMU + quantum sensor fusion.
 
 Academic References:
-    Q-CTRL Ironstone Opal (TIME Best Invention 2025): Achieved 111x accuracy
-    improvement in GPS-denied navigation via quantum sensor fusion. Achieved
-    4m GPS-like accuracy over 700km airborne trials with dynamic maneuvers.
-    Quantum magnetometry + AI sensor fusion.
-    -- Primary reference. Demonstrates quantum-enhanced inertial navigation
-       using cold-atom interferometry sensors fused with classical MEMS IMU
-       data via extended Kalman filtering. The 111x position accuracy
-       improvement over classical-only IMU is achieved by exploiting the
-       lower quantum sensor noise floor (quantum_noise ~0.002 vs
-       classical_noise ~0.1 in normalized units).
-
-    DARPA contracts: $24.4M across 2 programs for quantum-assured navigation.
-
-    Singapore Airshow Feb 2026: Q-CTRL demonstrated Ironstone in commercial
-    aviation context. Lockheed Martin partnership via DoD/DIU contract.
+    Quantum-enhanced inertial navigation via cold-atom interferometry sensors
+    fused with classical MEMS IMU data through extended Kalman filtering.
+    Position accuracy improvements arise from the lower quantum sensor noise
+    floor (quantum_noise ~0.002 vs classical_noise ~0.1 in normalized units).
 
     arXiv:2507.18606 - The fused sensor output feeds into the POMDP
     observation model, where lower sensor noise translates to higher
