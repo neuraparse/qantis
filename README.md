@@ -1,48 +1,96 @@
+<div align="center">
+
 # QANTIS
 
 **Quantum Autonomous Navigation, Tracking & Intelligence System**
 
-Quantum computing platform for autonomous systems: **POMDP belief-state estimation** and **multi-hypothesis tracking (MHT)** using quantum annealing, QAOA, and amplitude estimation — with hardware validation on IBM Heron processors.
+*A quantum-native platform for next-generation autonomous systems.*
 
-Built by **Neura Parse Ltd** as a [uv](https://docs.astral.sh/uv/) workspace monorepo.
+[![Edition](https://img.shields.io/badge/edition-community-2563eb?style=flat-square)](#editions)
+[![Status](https://img.shields.io/badge/status-public--preview-10b981?style=flat-square)](#)
+[![License](https://img.shields.io/badge/license-MIT-111827?style=flat-square)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?style=flat-square)](#)
+[![Built by](https://img.shields.io/badge/built%20by-Neura%20Parse%20Ltd-0f172a?style=flat-square)](#)
 
----
-
-## Packages
-
-| Package | Description | Key Algorithms |
-|---------|-------------|----------------|
-| **quantum-common** | Shared infrastructure: backend abstraction, error mitigation, config, benchmarking | ZNE, PEC, Pauli twirling, readout mitigation, noise modelling |
-| **quantum-pomdp** | Quantum-enhanced POMDP planning for autonomous navigation | QBRL, BIQAE, Grover-AA belief oracle, quantum belief update circuits |
-| **quantum-mht** | Quantum multi-hypothesis tracking for drone swarm surveillance | QUBO formulation, D-Wave annealing, QAOA, FPC-QAOA, Kalman filtering |
+</div>
 
 ---
 
-## Architecture
-
-```
-qantis/
-  packages/
-    quantum-common/    # backends, mitigation, config — shared library
-    quantum-pomdp/     # POMDP belief estimation  (depends on quantum-common)
-    quantum-mht/       # multi-hypothesis tracking (depends on quantum-common)
-  configs/             # backend + experiment YAML configs
-  scripts/hardware/    # IBM/D-Wave hardware run scripts
-  output/hardware/     # hardware job results (JSON, timestamped)
-```
-
-Heavyweight quantum SDKs (Qiskit, D-Wave Ocean, PennyLane, Mitiq) are **optional dependencies** — the core packages install cleanly with only NumPy/SciPy.
+> ### Community Edition Notice
+>
+> You are looking at the **public, community-facing distribution** of QANTIS.
+> This repository is intentionally a **basic edition** — it ships a clean, didactic surface of the platform so that researchers, students, and partners can understand the architecture and integrate at the API level.
+>
+> The **full QANTIS platform**, including production-grade modules, advanced optimisation backends, hardened mitigation pipelines, internal tooling, and the complete experimental harness, is maintained in a **private workspace reserved for Neura Parse collaborators and contracted partners**.
+>
+> Real benchmark runs, hardware campaign results, comparative studies, and superior performance figures obtained on production backends are **not published in this repository**. Selected outcomes are disclosed only through peer-reviewed publications, partner briefings, and formal engagements with Neura Parse Ltd.
 
 ---
 
-## Requirements
+## About
 
-- **Python 3.12+**
-- **uv** package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
+QANTIS is a **quantum-native framework** designed by Neura Parse Ltd for autonomous systems that must operate under uncertainty — drone swarms, GPS-denied navigation, multi-target surveillance, and intelligent decision making in adversarial environments.
+
+The platform is structured as a **core framework** with a family of **purpose-built applications** running on top of it. Each application solves a real-world autonomy problem; the framework handles everything underneath — backends, mitigation, configuration, reproducibility.
 
 ---
 
-## Installation
+## The Platform
+
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <h3>Quantum Common</h3>
+      <em>The Framework</em>
+      <p>The foundation layer of the QANTIS platform. Provides the unified backend abstraction, configuration system, error-mitigation pipeline, benchmarking and reproducibility infrastructure that every QANTIS application is built on.</p>
+    </td>
+    <td width="33%" valign="top">
+      <h3>Quantum POMDP App</h3>
+      <em>Decision Making Under Uncertainty</em>
+      <p>An application focused on belief-state planning for autonomous agents operating with partial information. Targets navigation, mission planning and policy execution in environments where perception is incomplete or unreliable.</p>
+    </td>
+    <td width="33%" valign="top">
+      <h3>Quantum MHT App</h3>
+      <em>Multi-Target Tracking</em>
+      <p>An application for large-scale multi-hypothesis tracking, designed for drone swarm surveillance and dense multi-target scenarios where classical association becomes intractable at scale.</p>
+    </td>
+  </tr>
+</table>
+
+> The full QANTIS platform extends well beyond autonomy. Additional applications — including **Quantum-Bio Intelligence** for computational life sciences, a dedicated **CRISPR** application for quantum-assisted genome design and target analysis, alongside modules covering sensor fusion, adversarial robustness, and mission-level orchestration — are developed inside the private collaborator workspace and are not part of this Community Edition.
+
+---
+
+## Editions
+
+QANTIS is distributed in two editions. This repository corresponds to the first row.
+
+| | **Community Edition** *(this repository)* | **Collaborator Edition** *(private)* |
+|---|---|---|
+| Audience | Public, academic, evaluation | Neura Parse partners & collaborators |
+| Framework core | Included, basic surface | Full production framework |
+| Applications | Reference subset (POMDP, MHT) | Complete suite — incl. Quantum-Bio Intelligence, CRISPR, and more |
+| Backends | Standard public connectors | Hardened, optimised, multi-vendor |
+| Error mitigation | Baseline pipeline | Full mitigation & calibration stack |
+| Benchmarks & datasets | Illustrative only | Full experimental harness |
+| Real hardware results | Not published here | Reserved for partners |
+| Support | Community, best-effort | Dedicated engineering support |
+
+Access to the Collaborator Edition is granted on a case-by-case basis through formal engagement with Neura Parse Ltd.
+
+---
+
+## Design Principles
+
+- **Framework-first.** A single, well-defined core powers every QANTIS application. No application owns its own infrastructure.
+- **Backend-agnostic.** Applications are written once and dispatched across simulators, gate-based hardware, and quantum annealers through a uniform interface.
+- **Reproducibility by construction.** Every run is configuration-driven, versioned, and traceable.
+- **Incremental adoption.** Heavy quantum SDKs are optional; the framework installs cleanly with a minimal scientific Python stack.
+- **Hybrid by default.** Quantum routines are designed to interoperate with classical baselines, not to replace them.
+
+---
+
+## Getting Started
 
 ```bash
 git clone https://github.com/neuraparse/qantis.git
@@ -50,141 +98,66 @@ cd qantis
 uv sync
 ```
 
-### Optional quantum backends
+Optional quantum backends and visualisation extras are available as installable groups. See the in-package documentation for the relevant extras for your environment.
 
-```bash
-uv pip install "quantum-common[ibm]"        # Qiskit + Aer simulator
-uv pip install "quantum-common[dwave]"      # D-Wave Ocean
-uv pip install "quantum-common[pennylane]"  # PennyLane / QAOA
-uv pip install "quantum-common[mitiq]"      # ZNE, PEC error mitigation
-uv pip install "quantum-common[viz]"        # matplotlib, plotly
-uv pip install "quantum-common[all]"        # everything
-```
-
-### Hardware credentials
-
-```bash
-cp .env.example .env
-# Set IBM_QUANTUM_TOKEN and/or DWAVE_API_TOKEN in .env
-```
+> The Community Edition is intended for **architectural exploration, integration testing, and educational use**. It is not a substitute for the Collaborator Edition in production or research-grade evaluation contexts.
 
 ---
 
-## Quick Start
+## What Is *Not* Included
 
-### POMDP — Hybrid quantum–classical planning
+To set expectations clearly, the following are deliberately **outside the scope** of this Community Edition:
 
-```python
-from quantum_pomdp.scenarios.tiger_problem import TigerProblem
-from quantum_pomdp.models.belief_state import BeliefState
-from quantum_pomdp.algorithms.qbrl import QBRLPlanner, QBRLConfig
+- Production-grade application variants and internal QANTIS modules
+- Calibrated, hardware-tuned mitigation and optimisation pipelines
+- Real measurement data, raw hardware traces, and campaign artefacts
+- Comparative benchmarks and performance figures vs. classical state-of-the-art
+- Confidential datasets, scenarios, and mission profiles developed with partners
+- Any results that constitute commercial or research advantage for Neura Parse Ltd
 
-tiger = TigerProblem.create()
-belief = BeliefState.uniform(tiger.num_states)
-planner = QBRLPlanner(tiger, QBRLConfig(horizon=3, num_simulations=100))
-action = planner.select_action(belief)
-print(f"Recommended action: {action}")
-```
-
-### MHT — QUBO-based multi-target data association
-
-```python
-import numpy as np
-from quantum_mht.formulation.cost_matrix import CostMatrixBuilder
-from quantum_mht.formulation.mtda_qubo_builder import MTDAQuboBuilder
-from quantum_mht.solvers.solver_factory import create_solver
-
-cost_matrix = CostMatrixBuilder().build(
-    track_predictions=np.array([[1.0, 2.0], [3.0, 4.0]]),
-    measurements=np.array([[1.1, 2.1], [3.1, 3.9], [5.0, 6.0]]),
-    gate_threshold=9.21,
-)
-qubo = MTDAQuboBuilder().build(cost_matrix)
-solution = create_solver("hungarian").solve(qubo)
-print(f"Assignments: {solution.assignments}")
-```
+These remain proprietary to the Collaborator Edition. Public communication of selected results occurs through formal channels only.
 
 ---
 
-## Tests
+## Roadmap (Public Track)
 
-```bash
-uv run pytest                              # all unit tests
-uv run pytest packages/quantum-pomdp/     # single package
-uv run pytest --cov=quantum_common --cov=quantum_pomdp --cov=quantum_mht
-uv run pytest -m integration              # requires live backend credentials
-uv run pytest -m benchmark
-```
+The Community Edition follows a separate, slower release track than the internal platform. Public milestones focus on:
 
-Tests requiring optional SDKs are automatically skipped if not installed.
+- Stabilising the framework API surface
+- Expanding didactic examples and integration guides
+- Publishing reference notebooks aligned with peer-reviewed outputs
+- Hardening installation and onboarding for new contributors
 
----
-
-## Running on IBM Hardware
-
-```bash
-export IBM_QUANTUM_TOKEN=<your-token>
-
-uv run python scripts/hardware/run_fpc_qaoa_ibm.py
-# Results saved to output/hardware/<experiment>_ibm_<timestamp>.json
-```
-
-Backend settings: `configs/backends/ibm_quantum.yaml`
+Items on the internal roadmap — including production applications, advanced backends, and benchmark releases — are governed independently and are not announced here.
 
 ---
 
-## Project Structure
+## Contributing
 
-```
-packages/
-  quantum-common/src/quantum_common/
-    config/              # Pydantic schemas, YAML loader, credentials (SecretStr)
-    backends/            # IBM, D-Wave, PennyLane, Azure, local simulator
-    mitigation/          # ZNE, PEC, Pauli twirling, readout, noise pipeline
-    benchmarking/        # metrics, runner, storage, reproducibility
-    visualization/       # circuit, benchmark, style plotting
-  quantum-pomdp/src/quantum_pomdp/
-    models/              # POMDPModel, BeliefState, BayesianNetwork
-    quantum_circuits/    # belief update, register map, unitaries, amplitude amplification
-    algorithms/          # QBRL planner, BIQAE estimator, lookahead tree
-    scenarios/           # Tiger, 4-state Tiger, GPS-denied, grid navigation
-    pipeline/            # hybrid quantum-classical pipeline
-    classical_baselines/ # POMCP, DESPOT, PBVI
-  quantum-mht/src/quantum_mht/
-    formulation/         # cost matrix, QUBO builder, constraints, variables
-    solvers/             # QAOA, FPC-QAOA, annealing, hybrid, Hungarian, JPDA
-    tracking/            # Kalman, EKF, gating, track lifecycle
-    simulation/          # drone swarm, dynamics, targets, world model
-    pipeline/            # 5-stage pipeline (predict→gate→associate→update→manage)
-```
+Community contributions are welcome for documentation, examples, integration fixes, and onboarding improvements. Contributions affecting the framework core or any QANTIS application are reviewed against the internal platform and may be deferred or adapted to maintain compatibility with the Collaborator Edition.
+
+For substantial collaboration, joint research, or evaluation under the Collaborator Edition, please contact Neura Parse Ltd directly.
 
 ---
 
-## Supported Backends
+## Citation
 
-| Backend | Extra | Hardware |
-|---------|-------|----------|
-| IBM Qiskit | `[ibm]` | ibm\_marrakesh (156q Heron R2), ibm\_torino (133q Heron R1), Aer simulator |
-| D-Wave Ocean | `[dwave]` | Advantage2 (4400+ qubits, Zephyr) |
-| PennyLane | `[pennylane]` | Variational circuits, QAOA, multiple plugins |
-| Azure Quantum | `[ibm]` | IonQ Aria-2 (25q), Quantinuum H2 (56q) |
-| Local simulator | *(included)* | CPU — development and testing |
-
----
-
-## Development
-
-```bash
-uv run ruff check packages/
-uv run ruff format packages/
-uv run mypy packages/
-uv run pre-commit run --all-files
-```
+If you reference QANTIS in academic or technical work, please cite the official Neura Parse publications associated with the platform. Citing this repository alone is not sufficient to attribute results obtained on the full platform.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Released under the **MIT License**. See [LICENSE](LICENSE) for details.
 
-**Neura Parse Ltd.**
+The MIT license applies to the source code in this Community Edition repository. It does not extend to internal QANTIS modules, datasets, calibration data, or experimental results maintained outside this repository.
+
+---
+
+<div align="center">
+
+**QANTIS** — engineered by **Neura Parse Ltd**.
+
+*Quantum technology for autonomous systems that have to work in the real world.*
+
+</div>
