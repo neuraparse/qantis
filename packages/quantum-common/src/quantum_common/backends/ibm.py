@@ -48,6 +48,32 @@ from quantum_common.types import BackendType, QuantumParadigm
 from quantum_common.exceptions import BackendError
 from quantum_common.backends.base import ExecutionRequest, ExecutionResult
 
+
+def _databin_get_counts(pub_result: Any) -> dict[str, int]:
+    """Walk a SamplerV2 DataBin to the first get_counts-capable field.
+
+    qiskit-ibm-runtime 0.42 renamed / reshaped the DataBin so the legacy
+    ``data.meas`` attribute is no longer stable; the transpiled circuit
+    may expose the classical register under a different name depending
+    on layout. This helper is the single place where we paper over the
+    difference.
+    """
+    data = getattr(pub_result, "data", pub_result)
+    for name in ("meas", "c", "meas_c", "classical", "cr"):
+        field_obj = getattr(data, name, None)
+        if field_obj is not None and hasattr(field_obj, "get_counts"):
+            return dict(field_obj.get_counts())
+    for name in dir(data):
+        if name.startswith("_"):
+            continue
+        field_obj = getattr(data, name)
+        if hasattr(field_obj, "get_counts"):
+            return dict(field_obj.get_counts())
+    raise RuntimeError(
+        f"SamplerV2 DataBin exposes no classical field with get_counts; "
+        f"attributes: {[n for n in dir(data) if not n.startswith('_')]}"
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -162,11 +188,11 @@ class IBMQuantumBackend:
         result = job.result()
 
         all_counts: list[dict[str, int]] = []
-        # SamplerV2 returns PubResult objects; .data.meas holds the classical
-        # register as a BitArray. get_counts() converts to {bitstring: count}.
+        # SamplerV2 returns PubResult objects; DataBin field name depends on
+        # transpile layout (qiskit-ibm-runtime 0.42+) so walk to the first
+        # get_counts-capable field.
         for pub_result in result:
-            counts = pub_result.data.meas.get_counts()
-            all_counts.append(dict(counts))
+            all_counts.append(_databin_get_counts(pub_result))
 
         elapsed = time.perf_counter() - t0
         return ExecutionResult(
@@ -213,3 +239,157 @@ class IBMQuantumBackend:
             }
         except Exception as e:
             return {"backend": self.backend_name, "error": str(e)}
+
+    # ------------------------------------------------------------------
+    # Qiskit Runtime V2 execution modes
+    # ------------------------------------------------------------------
+
+    def run_iterative(
+        self,
+        ansatz_fn: Any,
+        cost_op: Any,
+        theta0: Any,
+        optimizer: Any,
+        shots: int = 4096,
+        enable_dd: bool = True,
+    ) -> Any:
+        """Iterative QAOA / QBRL loop inside a Runtime ``Session``.
+
+        qiskit-ibm-runtime Q4 2025 - Q2 2026 docs continue to recommend
+        :class:`Session` (not :class:`Batch`) for optimization loops
+        where each objective evaluation depends on the previous one.
+        The session preserves QPU allocation between classical steps.
+        """
+        try:
+            from qiskit_ibm_runtime import Session, EstimatorV2
+        except ImportError as exc:
+            raise BackendError("qiskit-ibm-runtime not installed") from exc
+
+        service = self._get_service()
+        backend = service.backend(self.backend_name)
+        with Session(backend=backend) as session:
+            estimator = EstimatorV2(mode=session)
+            estimator.options.default_shots = int(shots)
+            if enable_dd:
+                try:
+                    estimator.options.dynamical_decoupling.enable = True
+                except Exception:
+                    logger.debug("EstimatorV2 DD option unavailable on this runtime")
+
+            def objective(theta: Any) -> float:
+                pub = (ansatz_fn(theta), [cost_op])
+                job = estimator.run([pub])
+                return float(job.result()[0].data.evs[0])
+
+            return optimizer.minimize(objective, theta0)
+
+    def run_batch(
+        self,
+        circuits: list[Any],
+        shots: int = 4096,
+    ) -> ExecutionResult:
+        """Submit a non-adaptive batch of circuits under Runtime ``Batch``.
+
+        Prefer this for BIQAE posterior sweeps and any other workload
+        where every PUB is known upfront. Batch packs submissions into
+        a single queue slot while bypassing Session's iterative machinery.
+        """
+        import time
+
+        try:
+            from qiskit_ibm_runtime import Batch, SamplerV2
+        except ImportError as exc:
+            raise BackendError("qiskit-ibm-runtime not installed") from exc
+
+        service = self._get_service()
+        backend = service.backend(self.backend_name)
+
+        t0 = time.perf_counter()
+        with Batch(backend=backend) as batch:
+            sampler = SamplerV2(mode=batch)
+            job = sampler.run(circuits, shots=shots)
+            result = job.result()
+
+        all_counts: list[dict[str, int]] = []
+        for pub_result in result:
+            all_counts.append(_databin_get_counts(pub_result))
+
+        elapsed = time.perf_counter() - t0
+        return ExecutionResult(
+            counts=all_counts,
+            raw_results=[result],
+            metadata={
+                "backend": self.backend_name,
+                "mode": "batch",
+                "job_id": job.job_id(),
+                "shots": shots,
+            },
+            execution_time_s=elapsed,
+        )
+
+    # ------------------------------------------------------------------
+    # Q-CTRL Fire Opal (Qiskit Function, Premium / Flex plan gated)
+    # ------------------------------------------------------------------
+
+    def execute_fire_opal(
+        self,
+        request: ExecutionRequest,
+        primitive: str = "sampler",
+        optimization_level: int = 1,
+    ) -> ExecutionResult:
+        """Route circuits through Q-CTRL's Fire Opal Qiskit Function.
+
+        Fire Opal stacks pulse-level error-suppression (DD, measurement
+        twirling, tuned gate replacements) in front of SamplerV2 /
+        EstimatorV2 and was demonstrated to reach 75-qubit verifiable
+        entanglement on ibm_fez in Edmunds et al. PRX Quantum 6, 020331
+        (2025), DOI 10.1103/PRXQuantum.6.020331. Requires an IBM
+        Premium / Flex plan with the ``q-ctrl/performance-management``
+        function installed; raises :class:`BackendError` otherwise.
+        """
+        import time
+
+        try:
+            from qiskit_ibm_catalog import QiskitFunctionsCatalog  # type: ignore
+        except ImportError as exc:
+            raise BackendError(
+                "qiskit-ibm-catalog not installed (required for Fire Opal)"
+            ) from exc
+
+        catalog = QiskitFunctionsCatalog(channel=self.channel, token=self.token)
+        try:
+            perf = catalog.load("q-ctrl/performance-management")
+        except Exception as exc:
+            raise BackendError(
+                "Fire Opal Qiskit Function requires an IBM Premium or Flex plan; "
+                f"load failed: {exc}"
+            ) from exc
+
+        t0 = time.perf_counter()
+        job = perf.run(
+            pubs=[(c,) for c in request.circuits],
+            backend_name=self.backend_name,
+            shots=request.shots,
+            primitive=primitive,
+        )
+        result = job.result()
+
+        all_counts: list[dict[str, int]] = []
+        for pub_result in result:
+            try:
+                all_counts.append(_databin_get_counts(pub_result))
+            except Exception:
+                all_counts.append({})
+
+        elapsed = time.perf_counter() - t0
+        return ExecutionResult(
+            counts=all_counts,
+            raw_results=[result],
+            metadata={
+                "backend": self.backend_name,
+                "mode": "fire_opal",
+                "optimization_level": optimization_level,
+                "shots": request.shots,
+            },
+            execution_time_s=elapsed,
+        )

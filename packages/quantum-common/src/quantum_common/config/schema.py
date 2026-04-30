@@ -103,7 +103,15 @@ class Credentials(BaseSettings):
     - AZURE_QUANTUM_*: Azure Quantum SDK 2.3 workspace configuration
     """
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        # Allow user-specific .env additions (per-collaborator tokens such as
+        # IBM_QUANTUM_TOKEN_ALICE / IBM_QUANTUM_INSTANCE_BOB) without
+        # failing validation. Only the declared fields below are promoted
+        # to attributes; anything else is ignored.
+        "extra": "ignore",
+    }
 
     ibm_quantum_token: SecretStr | None = Field(
         default=None, alias="IBM_QUANTUM_TOKEN"

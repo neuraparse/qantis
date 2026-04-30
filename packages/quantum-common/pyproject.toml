@@ -4,8 +4,6 @@ version = "0.1.0"
 description = "Shared quantum computing infrastructure for autonomous systems research"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-authors = [{ name = "Neura Parse Ltd" }]
-readme = "../../README.md"
 
 dependencies = [
     # Scientific computing (core)
@@ -36,7 +34,11 @@ pennylane = [
     "pennylane>=0.40,<1",
 ]
 mitiq = [
-    "mitiq>=0.38,<1",
+    # Mitiq 0.44+ (Feb 2026) renames `scaled_circuits` -> `construct_circuits`,
+    # adds Virtual Distillation, PEA, and non-Clifford ZNE/PEC support. This
+    # package targets that API; older 0.38–0.43 installs are no longer
+    # supported by quantum-common's ZNEStrategy / PECStrategy wrappers.
+    "mitiq>=0.44,<1",
 ]
 viz = [
     "matplotlib>=3.9,<4",

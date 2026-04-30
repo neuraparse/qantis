@@ -5,6 +5,9 @@ from quantum_pomdp.algorithms.biqae_estimator import (
     CalibratedBIQAEEstimator,
     CalibratedBIQAEConfig,
     CalibratedBIQAEResult,
+    OnlineCalibratedBIQAEEstimator,
+    OnlineCalibratedBIQAEConfig,
+    OnlineCalibratedBIQAEState,
 )
 
 __all__ = [
@@ -16,4 +19,7 @@ __all__ = [
     "CalibratedBIQAEEstimator",
     "CalibratedBIQAEConfig",
     "CalibratedBIQAEResult",
+    "OnlineCalibratedBIQAEEstimator",
+    "OnlineCalibratedBIQAEConfig",
+    "OnlineCalibratedBIQAEState",
 ]

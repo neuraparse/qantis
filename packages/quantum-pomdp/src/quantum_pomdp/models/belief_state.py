@@ -63,11 +63,26 @@ class BeliefState:
         counts: dict[str, int],
         num_states: int,
         num_state_qubits: int,
+        post_selection: dict[int, int] | None = None,
     ) -> BeliefState:
         """Reconstruct belief state from quantum circuit measurement results.
 
-        Measurement counts are converted to a probability distribution
-        over the state space by extracting the state register bits.
+        The QBRL belief-update circuit (arXiv:2507.18606 Fig. 3) stores
+        the next-state register in classical bits ``[0, num_state_qubits)``
+        and the observation register in the remaining classical bits.
+        Qiskit's ``counts`` dict uses the big-endian string convention, so
+        ``bitstring[-1]`` is ``classical[0]`` and ``bitstring[0]`` is the
+        highest-indexed classical bit. This method therefore reads the
+        state bits from the **right** of the bitstring.
+
+        When the circuit includes Brassard-Hoyer-Mosca-Tapp amplitude
+        amplification for a specific observation (G^k(o)), the evidence
+        subspace is amplified but not fully collapsed; passing
+        ``post_selection={obs_bit_index: expected_value, ...}`` (with
+        bit indices specified as *classical-register indices*, i.e.
+        ``num_state_qubits`` is the first observation bit) keeps only
+        the shots whose observation register matches the desired value,
+        recovering the exact conditional ``P(s'|b,a,o)``.
         """
         total_shots = sum(counts.values())
         if total_shots == 0:
@@ -75,9 +90,17 @@ class BeliefState:
 
         probs = np.zeros(num_states)
         for bitstring, count in counts.items():
-            # Extract state register bits (first num_state_qubits bits)
-            state_bits = bitstring[:num_state_qubits]
-            state_idx = int(state_bits, 2)
+            bs = bitstring.replace(" ", "")
+
+            if post_selection is not None:
+                if not all(
+                    bs[-1 - c_idx] == str(expected)
+                    for c_idx, expected in post_selection.items()
+                ):
+                    continue
+
+            state_bits = bs[-num_state_qubits:] if num_state_qubits > 0 else ""
+            state_idx = int(state_bits, 2) if state_bits else 0
             if state_idx < num_states:
                 probs[state_idx] += count
 

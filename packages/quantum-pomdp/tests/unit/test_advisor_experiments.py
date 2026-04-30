@@ -1,5 +1,9 @@
 """Tests for the publication-oriented advisor experiment helpers."""
 
+import pytest
+
+pytest.importorskip("qiskit")
+
 from quantum_pomdp.analysis.advisor_experiments import (
     corridor_tiger_4state_simulator_report,
     scenario_resource_pathway_report,
@@ -39,9 +43,24 @@ def test_resource_pathway_scales_with_problem_size() -> None:
     report = scenario_resource_pathway_report()
     by_label = {item["label"]: item for item in report}
 
-    assert by_label["Tiger-2"]["total_circuit_qubits"] < by_label["CorridorTiger-4"]["total_circuit_qubits"]
-    assert by_label["CorridorTiger-4"]["total_circuit_qubits"] < by_label["GridNavigation-4x4"]["total_circuit_qubits"]
-    assert by_label["GridNavigation-4x4"]["total_circuit_qubits"] < by_label["GPSDenied-6x6"]["total_circuit_qubits"]
+    assert (
+        by_label["Tiger-2"]["total_circuit_qubits"]
+        < by_label["CorridorTiger-4"]["total_circuit_qubits"]
+    )
+    assert (
+        by_label["CorridorTiger-4"]["total_circuit_qubits"]
+        < by_label["GridNavigation-4x4"]["total_circuit_qubits"]
+    )
+    assert (
+        by_label["GridNavigation-4x4"]["total_circuit_qubits"]
+        < by_label["GPSDenied-6x6"]["total_circuit_qubits"]
+    )
 
-    assert by_label["GridNavigation-4x4"]["classical_queries_per_accept"] > by_label["Tiger-2"]["classical_queries_per_accept"]
-    assert by_label["GPSDenied-6x6"]["asymptotic_sample_efficiency_gain"] > by_label["GPSDenied-4x4"]["asymptotic_sample_efficiency_gain"]
+    assert (
+        by_label["GridNavigation-4x4"]["classical_queries_per_accept"]
+        > by_label["Tiger-2"]["classical_queries_per_accept"]
+    )
+    assert (
+        by_label["GPSDenied-6x6"]["asymptotic_sample_efficiency_gain"]
+        > by_label["GPSDenied-4x4"]["asymptotic_sample_efficiency_gain"]
+    )

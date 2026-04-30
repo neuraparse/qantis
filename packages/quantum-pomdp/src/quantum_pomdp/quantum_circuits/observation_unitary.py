@@ -56,8 +56,11 @@ class ObservationUnitary:
                 if all(abs(angle) < 1e-10 for angle in angles):
                     continue
 
-                ctrl_state_bits = format(s_prime, f"0{n_state_bits}b")
-                ctrl_action_bits = format(a, f"0{n_action_bits}b")
+                # Qiskit register convention: register[0] is the LSB. The
+                # `format(x, "Nb")` string is MSB-first, so reverse to
+                # align with the LSB-first ctrl_qubits ordering.
+                ctrl_state_bits = format(s_prime, f"0{n_state_bits}b")[::-1]
+                ctrl_action_bits = format(a, f"0{n_action_bits}b")[::-1]
 
                 self._apply_controlled_rotation(
                     circuit, angles, ctrl_state_bits, ctrl_action_bits

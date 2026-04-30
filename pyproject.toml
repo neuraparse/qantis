@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Neura Parse Ltd" }]
 readme = "README.md"
+dependencies = [
+    "numpy>=1.26,<3",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -36,13 +39,13 @@ src = ["packages/*/src"]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["quantum_common", "quantum_pomdp", "quantum_mht"]
+known-first-party = ["quantum_common", "quantum_pomdp", "quantum_mht", "qantis_engine"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 warn_return_any = true
-packages = ["quantum_common", "quantum_pomdp", "quantum_mht"]
+packages = ["quantum_common", "quantum_pomdp", "quantum_mht", "qantis_engine"]
 
 [[tool.mypy.overrides]]
 module = [
@@ -56,9 +59,11 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = [
+    "tests",
     "packages/quantum-common/tests",
     "packages/quantum-pomdp/tests",
     "packages/quantum-mht/tests",
+    "packages/qantis-engine/tests",
 ]
 markers = [
     "integration: marks tests requiring live quantum backend connectivity",

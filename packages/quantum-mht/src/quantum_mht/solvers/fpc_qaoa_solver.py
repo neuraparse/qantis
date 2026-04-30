@@ -180,13 +180,18 @@ class FPCQAOASolver(MTDASolver):
         # Digitize smooth schedules into QAOA initial_point
         initial_point = self._build_qaoa_initial_point(gamma_coeffs, beta_coeffs)
 
-        # Import QAOA -- qiskit-optimization 0.7+ (Qiskit v2.3, Jan 2026) migration
+        # qiskit-optimization 0.7 (Jan 2026) moved QAOA into
+        # qiskit_optimization.minimum_eigensolvers; qiskit_algorithms is frozen.
         try:
-            from qiskit_optimization.algorithms import QAOA
-            from qiskit_algorithms.optimizers import COBYLA, SPSA
+            from qiskit_optimization.minimum_eigensolvers import QAOA
+            from qiskit_optimization.optimizers import COBYLA, SPSA
         except ImportError:
-            from qiskit_algorithms import QAOA
-            from qiskit_algorithms.optimizers import COBYLA, SPSA
+            try:
+                from qiskit_optimization.algorithms import QAOA
+                from qiskit_algorithms.optimizers import COBYLA, SPSA
+            except ImportError:
+                from qiskit_algorithms import QAOA
+                from qiskit_algorithms.optimizers import COBYLA, SPSA
 
         # Qiskit 2.2+: StatevectorSampler does not natively decompose
         # PauliEvolutionGate (used inside QAOAAnsatz), causing a per-evaluation

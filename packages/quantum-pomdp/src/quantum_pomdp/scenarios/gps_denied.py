@@ -1,9 +1,19 @@
 """GPS-denied UAV navigation scenario.
 
 Academic References:
-    Quantum-enhanced inertial navigation via cold-atom interferometry sensors
-    fused with classical IMU data motivates quantum sensor integration for
-    POMDP observation models in GPS-denied environments.
+    Q-CTRL Ironstone Opal (TIME Best Invention 2025): Achieved 111x accuracy
+    improvement in GPS-denied navigation via quantum sensor fusion. Achieved
+    4m GPS-like accuracy over 700km airborne trials with dynamic maneuvers.
+    Quantum magnetometry + AI sensor fusion.
+    -- Demonstrates quantum-enhanced inertial navigation using cold-atom
+       interferometry sensors fused with classical IMU data. The 111x
+       improvement in position accuracy motivates quantum sensor
+       integration for POMDP observation models in GPS-denied environments.
+
+    DARPA contracts: $24.4M across 2 programs for quantum-assured navigation.
+
+    Showcased at Singapore Airshow Feb 2026; Lockheed Martin partnership
+    via DoD/DIU contract.
 
     arXiv:2507.18606 - GPS-denied navigation as a real-world application
     scenario for QBRL. The low observation accuracy (sensor_accuracy ~0.7)

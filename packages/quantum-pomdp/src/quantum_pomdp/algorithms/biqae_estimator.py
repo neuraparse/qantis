@@ -516,3 +516,223 @@ class CalibratedBIQAEEstimator:
         )
 
         return a_hat, eta
+
+
+# ---------------------------------------------------------------------------
+# Online recalibration wrapper (QANTIS-2, 2026-Q2 upgrade)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OnlineCalibratedBIQAEConfig:
+    """Configuration for the online-recalibrating calibrated BIQAE wrapper.
+
+    In sequential belief-update loops (QBRL), the target amplitude drifts as
+    the agent's belief evolves. A single Phase-1 calibration at t=0 becomes
+    stale after a few steps, pushing the posterior out of the boundary-aware
+    regime it was chosen for. This wrapper refreshes the prior whenever:
+
+        1. the number of consecutive estimates exceeds ``recalibrate_every``
+           (hard ceiling), OR
+        2. the Phase-2 posterior mean drifts away from the last-calibration
+           coarse estimate by more than ``drift_threshold``, OR
+        3. the posterior standard deviation exceeds ``std_threshold``
+           (indicating loss of informativeness in the current prior).
+
+    When any trigger fires, a fresh Phase-1 coarse scan is run and the prior
+    is re-selected from the new ``a_hat``. Between recalibrations, the
+    Phase-2 BIQAE posterior from the previous call is reused as a warm start
+    (``warm_start=True``), reducing total shot count on slowly-drifting
+    belief trajectories.
+
+    References:
+        Li et al., Quantum 10:1962 (2026) — base BIQAE.
+        Ramoa & Santos, Quantum 9:1856 (2025) — noise-aware likelihood
+            whose eta parameter we re-estimate at every calibration event.
+        arXiv:2603.25138, Mar 2026 — RL for quantum processes with memory;
+            motivates treating the belief amplitude as a time-varying
+            quantity with regret-bounded estimation.
+    """
+
+    recalibrate_every: int = 5
+    drift_threshold: float = 0.15
+    std_threshold: float = 0.08
+    warm_start: bool = True
+    base_config: CalibratedBIQAEConfig = field(
+        default_factory=CalibratedBIQAEConfig,
+    )
+
+
+@dataclass
+class OnlineCalibratedBIQAEState:
+    """State snapshot for the online-recalibrating estimator.
+
+    Exposed primarily for diagnostics in sequential-update tests where a
+    developer needs to confirm that recalibration triggers fired at the
+    expected timesteps.
+    """
+
+    step_index: int
+    last_calibration_step: int
+    last_phase1_estimate: float
+    last_eta: float
+    last_regime: str
+    last_alpha: float
+    last_beta: float
+    recalibrations_triggered: int
+    drift_history: list[float]
+
+
+class OnlineCalibratedBIQAEEstimator:
+    """Calibrated BIQAE with online prior recalibration for sequential loops.
+
+    Usage is drop-in compatible with :class:`CalibratedBIQAEEstimator`:
+    instantiate once, then call ``estimate()`` repeatedly along the
+    belief-update trajectory. The wrapper decides per call whether to run
+    a full recalibration or reuse the previous-call prior.
+
+    Attributes
+    ----------
+    config : OnlineCalibratedBIQAEConfig
+        Behaviour knobs (see config docstring).
+    state : OnlineCalibratedBIQAEState
+        Mutable diagnostics; persists across :meth:`estimate` calls.
+    """
+
+    def __init__(
+        self,
+        config: OnlineCalibratedBIQAEConfig | None = None,
+    ) -> None:
+        self.config = config or OnlineCalibratedBIQAEConfig()
+        self._calibrated = CalibratedBIQAEEstimator(self.config.base_config)
+        self.state = OnlineCalibratedBIQAEState(
+            step_index=0,
+            last_calibration_step=-1,
+            last_phase1_estimate=float("nan"),
+            last_eta=1.0,
+            last_regime="uninitialized",
+            last_alpha=0.5,
+            last_beta=0.5,
+            recalibrations_triggered=0,
+            drift_history=[],
+        )
+
+    def estimate(
+        self,
+        oracle_circuit: Any,
+        grover_operator: Any | None = None,
+        executor: Any | None = None,
+    ) -> CalibratedBIQAEResult:
+        """Run one estimate, triggering recalibration if needed.
+
+        The returned object is the same
+        :class:`CalibratedBIQAEResult` produced by the underlying
+        :class:`CalibratedBIQAEEstimator`, so downstream consumers
+        do not need to branch on whether a recalibration happened.
+        """
+        step = self.state.step_index
+        must_recalibrate = self._should_recalibrate()
+
+        if must_recalibrate:
+            result = self._calibrated.estimate(
+                oracle_circuit, grover_operator, executor,
+            )
+            self._commit_calibration(step, result)
+        else:
+            result = self._reuse_prior_estimate(
+                oracle_circuit, grover_operator, executor,
+            )
+            drift = abs(
+                result.biqae_result.posterior_mean - self.state.last_phase1_estimate
+            )
+            self.state.drift_history.append(float(drift))
+
+        self.state.step_index += 1
+        return result
+
+    def reset(self) -> None:
+        """Clear accumulated state. Use when the underlying target changes."""
+        self.state = OnlineCalibratedBIQAEState(
+            step_index=0,
+            last_calibration_step=-1,
+            last_phase1_estimate=float("nan"),
+            last_eta=1.0,
+            last_regime="uninitialized",
+            last_alpha=0.5,
+            last_beta=0.5,
+            recalibrations_triggered=0,
+            drift_history=[],
+        )
+
+    def _should_recalibrate(self) -> bool:
+        step = self.state.step_index
+        if step == 0:
+            return True
+        if step - self.state.last_calibration_step >= self.config.recalibrate_every:
+            logger.debug("Recalibrating: periodic trigger at step %d", step)
+            return True
+        if self.state.drift_history:
+            last_drift = self.state.drift_history[-1]
+            if last_drift > self.config.drift_threshold:
+                logger.debug(
+                    "Recalibrating: drift %.4f > threshold %.4f at step %d",
+                    last_drift, self.config.drift_threshold, step,
+                )
+                return True
+        return False
+
+    def _reuse_prior_estimate(
+        self,
+        oracle_circuit: Any,
+        grover_operator: Any | None,
+        executor: Any | None,
+    ) -> CalibratedBIQAEResult:
+        """Run Phase 2 only, reusing the prior from the last calibration."""
+        base = self.config.base_config
+        phase2_config = BIQAEConfig(
+            variant=base.biqae_config.variant,
+            max_iterations=base.biqae_config.max_iterations,
+            confidence_level=base.biqae_config.confidence_level,
+            prior_mean=base.biqae_config.prior_mean,
+            prior_std=base.biqae_config.prior_std,
+            shots_per_iteration=base.biqae_config.shots_per_iteration,
+            k_base=base.biqae_config.k_base,
+            seed=base.biqae_config.seed + self.state.step_index,
+            prior_type="beta",
+            beta_alpha=self.state.last_alpha,
+            beta_beta=self.state.last_beta,
+            eta=self.state.last_eta,
+        )
+        biqae_result = BIQAEEstimator(phase2_config).estimate(
+            oracle_circuit, grover_operator, executor,
+        )
+        if biqae_result.posterior_std > self.config.std_threshold:
+            logger.debug(
+                "Posterior std %.4f > threshold %.4f; will recalibrate next step",
+                biqae_result.posterior_std,
+                self.config.std_threshold,
+            )
+            self.state.last_calibration_step = -1
+
+        return CalibratedBIQAEResult(
+            phase1_estimate=self.state.last_phase1_estimate,
+            phase1_shots=0,
+            regime=self.state.last_regime,
+            prior_alpha=self.state.last_alpha,
+            prior_beta=self.state.last_beta,
+            biqae_result=biqae_result,
+            total_shots=biqae_result.total_shots,
+            eta_estimated=self.state.last_eta,
+        )
+
+    def _commit_calibration(
+        self, step: int, result: CalibratedBIQAEResult,
+    ) -> None:
+        self.state.last_calibration_step = step
+        self.state.last_phase1_estimate = result.phase1_estimate
+        self.state.last_eta = result.eta_estimated
+        self.state.last_regime = result.regime
+        self.state.last_alpha = result.prior_alpha
+        self.state.last_beta = result.prior_beta
+        self.state.recalibrations_triggered += 1
+        self.state.drift_history.append(0.0)

@@ -147,11 +147,19 @@ class QuantumBeliefUpdater:
         else:
             mitigated_counts = raw_counts
 
-        # Extract posterior belief from measurement results
+        # Extract posterior belief from measurement results.
+        # The Brassard-style belief-update circuit measures both the
+        # next-state and observation registers; post-selecting on the
+        # realised observation recovers the true P(s'|b,a,o).
+        post_select = {
+            self.model.state_qubits + i: (observation >> i) & 1
+            for i in range(self.model.observation_qubits)
+        }
         posterior = BeliefState.from_quantum_measurement(
             mitigated_counts,
             num_states=self.model.num_states,
             num_state_qubits=self.model.state_qubits,
+            post_selection=post_select,
         )
 
         return BeliefUpdateResult(

@@ -44,32 +44,114 @@ class TransitionUnitary:
     def build(self, circuit: QuantumCircuit) -> None:
         """Append U_1 gates to the circuit.
 
-        For each (action, current_state) pair, applies controlled rotations
-        on the state_next register to produce the correct transition distribution.
+        For each action, specialises to the two structurally-common
+        POMDP transition patterns (identity and uniform over |S|) before
+        falling back to the multi-controlled rotation path. The fast
+        paths are exact for any |S| and keep circuit depth in the
+        O(|S| log |S|) regime that Heron R3 can tolerate.
+
+        For general transition distributions this emits a per-state
+        multi-controlled amplitude-encoding pattern. The implementation
+        currently encodes the MSB binary split of the conditional
+        P(s'|s,a) -- good enough for |S|<=2 and used only as a
+        fallback for non-trivial transitions in higher |S|.
         """
         num_actions, num_states, _ = self._T.shape
         n_state_bits = self._reg.state_current.size
         n_action_bits = self._reg.action.size
 
         for a in range(num_actions):
+            T_a = self._T[a]
+            if self._is_identity(T_a):
+                self._apply_identity_transition(circuit, a)
+                continue
+            if self._is_uniform(T_a, num_states):
+                self._apply_uniform_transition(circuit, a)
+                continue
+
+            # General fallback (legacy partial encoding -- flagged in paper
+            # appendix as a known limitation for non-identity/non-uniform
+            # transitions with |S| > 2).
             for s in range(num_states):
-                probs = self._T[a, s, :]
+                probs = T_a[s, :]
                 if np.allclose(probs, 0.0):
                     continue
 
-                # Compute rotation angles for amplitude encoding of P(s'|s,a)
                 angles = self._probs_to_angles(probs)
                 if all(abs(angle) < 1e-10 for angle in angles):
                     continue
 
-                # Build control condition: state_current == s AND action == a
                 ctrl_state_bits = format(s, f"0{n_state_bits}b")
                 ctrl_action_bits = format(a, f"0{n_action_bits}b")
 
-                # Apply controlled rotation using the target register
                 self._apply_controlled_amplitude_encoding(
                     circuit, angles, ctrl_state_bits, ctrl_action_bits
                 )
+
+    def _is_identity(self, T_a: NDArray[np.float64]) -> bool:
+        return bool(np.allclose(T_a, np.eye(T_a.shape[0])))
+
+    def _is_uniform(self, T_a: NDArray[np.float64], num_states: int) -> bool:
+        return bool(np.allclose(T_a, np.full_like(T_a, 1.0 / num_states)))
+
+    def _apply_identity_transition(self, circuit: QuantumCircuit, a: int) -> None:
+        """Copy state_current to state_next when action=a (identity transition).
+
+        Uses action-controlled CNOTs: for each bit index i, emit CNOT
+        (state_current[i] -> state_next[i]) wrapped in an action-equality
+        conditional realised via X-sandwich on action qubits. This
+        correctly reproduces the transition P(s' = s | s, a=listen) = 1
+        for any |S|.
+        """
+        n_state_bits = self._reg.state_current.size
+        n_action_bits = self._reg.action.size
+        ctrl_bits = format(a, f"0{n_action_bits}b")
+
+        x_positions = self._flip_action_zeros(circuit, ctrl_bits)
+        for i in range(n_state_bits):
+            from qiskit.circuit.library import XGate
+
+            controls = list(self._reg.action) + [self._reg.state_current[i]]
+            circuit.append(
+                XGate().control(len(controls)),
+                [*controls, self._reg.state_next[i]],
+            )
+        self._unflip_action_zeros(circuit, ctrl_bits, x_positions)
+
+    def _apply_uniform_transition(self, circuit: QuantumCircuit, a: int) -> None:
+        """Place state_next into uniform superposition when action=a.
+
+        For reset-uniform transitions (e.g. ``open`` in Tiger), emit
+        action-conditioned Hadamards on each state_next qubit. This
+        is the exact encoding of P(s'|s, open) = 1/|S|.
+        """
+        n_action_bits = self._reg.action.size
+        ctrl_bits = format(a, f"0{n_action_bits}b")
+        x_positions = self._flip_action_zeros(circuit, ctrl_bits)
+        from qiskit.circuit.library import HGate
+
+        for target in self._reg.state_next:
+            circuit.append(
+                HGate().control(n_action_bits),
+                [*list(self._reg.action), target],
+            )
+        self._unflip_action_zeros(circuit, ctrl_bits, x_positions)
+
+    def _flip_action_zeros(
+        self, circuit: QuantumCircuit, ctrl_bits: str
+    ) -> list[int]:
+        positions: list[int] = []
+        for i, bit in enumerate(ctrl_bits):
+            if bit == "0":
+                circuit.x(self._reg.action[i])
+                positions.append(i)
+        return positions
+
+    def _unflip_action_zeros(
+        self, circuit: QuantumCircuit, ctrl_bits: str, positions: list[int]
+    ) -> None:
+        for i in positions:
+            circuit.x(self._reg.action[i])
 
     def _probs_to_angles(self, probs: NDArray[np.float64]) -> list[float]:
         """Convert probability distribution to R_Y rotation angles.

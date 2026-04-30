@@ -82,14 +82,20 @@ class QAOASolver(MTDASolver):
                 )
         qp.minimize(linear=linear, quadratic=quadratic)
 
-        # Import QAOA -- qiskit-optimization 0.7+ (Qiskit v2.3, Jan 2026) migration:
-        # QAOA moved to qiskit_optimization.algorithms in 0.7+
+        # qiskit-optimization 0.7 (Jan 2026) moved QAOA into
+        # ``qiskit_optimization.minimum_eigensolvers`` and dropped the
+        # ``qiskit_algorithms`` dependency (qiskit_algorithms is frozen as of
+        # 2026-04). Keep a single fallback for <0.7 back-compat.
         try:
-            from qiskit_optimization.algorithms import QAOA
-            from qiskit_algorithms.optimizers import COBYLA
+            from qiskit_optimization.minimum_eigensolvers import QAOA
+            from qiskit_optimization.optimizers import COBYLA
         except ImportError:
-            from qiskit_algorithms import QAOA
-            from qiskit_algorithms.optimizers import COBYLA
+            try:
+                from qiskit_optimization.algorithms import QAOA
+                from qiskit_algorithms.optimizers import COBYLA
+            except ImportError:
+                from qiskit_algorithms import QAOA
+                from qiskit_algorithms.optimizers import COBYLA
 
         # StatevectorSampler: exact simulation, no shot noise
         # (for hardware, use SamplerV2 with explicit shots to avoid arXiv:2512.08245 issue)

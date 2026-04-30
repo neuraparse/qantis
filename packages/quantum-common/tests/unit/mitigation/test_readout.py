@@ -19,7 +19,10 @@ class TestReadoutMitigationStrategyCreation:
 
     def test_name_property(self) -> None:
         strategy = ReadoutMitigationStrategy()
-        assert strategy.name == "ReadoutMitigation"
+        # Upgraded 2026-04: label explicitly so the new Runtime-native
+        # path (RuntimeReadoutStrategy with TREx+M3) is distinguishable
+        # in benchmark reports.
+        assert strategy.name == "ReadoutMitigation(legacy-matrix)"
 
 
 class TestInferNumQubits:

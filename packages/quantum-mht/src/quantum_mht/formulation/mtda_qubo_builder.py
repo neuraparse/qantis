@@ -40,6 +40,7 @@ Academic References:
         Tracking", arXiv:2209.00615, 2022 -- multi-hypothesis QUBO enumeration.
 """
 from __future__ import annotations
+import math
 from dataclasses import dataclass
 from typing import Any
 import numpy as np
@@ -50,28 +51,117 @@ from quantum_mht.formulation.cost_matrix import CostMatrixBuilder
 
 @dataclass
 class QUBOResult:
-    """Result of QUBO construction (arXiv:2110.08346, Sec III-IV)."""
+    """Result of QUBO construction (arXiv:2110.08346, Sec III-IV).
+
+    Attributes
+    ----------
+    has_higher_order_terms : bool
+        Set by MHT extensions that introduce cubic+ interactions (e.g.,
+        cross-frame triplet continuity). Consumed by ``HybridSolver`` to
+        decide whether the NL (Stride) sampler is appropriate.
+    dynamic_range : float
+        Ratio of max to min non-zero |Q_ij|. Logged so reviewers can see
+        whether IEM preprocessing was needed (arXiv:2604.03546 Apr 2026).
+    """
+
     Q: dict[tuple[int, int], float]
     num_variables: int
     variables: AssociationVariables
     penalty: float
     offset: float = 0.0
+    has_higher_order_terms: bool = False
+    dynamic_range: float = 1.0
 
     def to_bqm(self) -> Any:
         """Convert to dimod BinaryQuadraticModel.
 
-        Creates a BQM compatible with D-Wave Ocean SDK 9.x samplers
-        (Advantage2, 4400+ qubits, Zephyr topology) and dimod-based solvers.
+        Creates a BQM compatible with D-Wave Ocean SDK 9.3 samplers
+        (Advantage2, 4400+ qubits, Zephyr topology, bias range [-6, 6]
+        as of May 2025 GA). ``auto_scale`` at the sampler level handles
+        any remaining range compression.
         """
         import dimod
-        linear = {}
-        quadratic = {}
+        linear: dict[int, float] = {}
+        quadratic: dict[tuple[int, int], float] = {}
         for (i, j), val in self.Q.items():
             if i == j:
                 linear[i] = linear.get(i, 0.0) + val
             else:
                 quadratic[(i, j)] = quadratic.get((i, j), 0.0) + val
         return dimod.BinaryQuadraticModel(linear, quadratic, self.offset, dimod.BINARY)
+
+    def compute_dynamic_range(self) -> float:
+        """Compute max(|Q_ij|) / min(|Q_ij|) over non-zero entries."""
+        magnitudes = [abs(v) for v in self.Q.values() if v != 0.0]
+        if not magnitudes:
+            return 1.0
+        return float(max(magnitudes) / max(min(magnitudes), 1e-12))
+
+
+def interaction_extension(
+    Q: dict[tuple[int, int], float],
+    next_var_index: int,
+    max_coupler_magnitude: float,
+) -> tuple[dict[tuple[int, int], float], int]:
+    """Ohno-Togawa Interaction-Extension Method (arXiv:2604.03546 Apr 2026).
+
+    For every coupler ``J_ij`` with ``|J_ij| > M``, split it across
+    ``k = ceil(|J_ij| / M)`` auxiliary spins so that no single coupler
+    exceeds ``M`` in magnitude. This compresses the coupler dynamic
+    range, reducing precision-induced embedding error on Advantage2.
+
+    .. warning::
+       The canonical IEM construction is stated in Ising form
+       (sigma in {-1, +1}). Applying it verbatim to QUBO form
+       (x in {0, 1}) preserves the dynamic-range reduction but **does
+       not guarantee an isomorphic ground-state landscape** -- the
+       auxiliary-variable relaxation introduces degeneracies that can
+       shift the optimum in the binary sector. Validate on a simulator
+       before production use, or convert to Ising, apply IEM, and
+       convert back. This function is opt-in (via
+       ``MTDAQuboBuilder.apply_interaction_extension``); callers that
+       care about exact-energy fidelity should leave it off.
+
+    Parameters
+    ----------
+    Q : dict
+        QUBO dictionary. Diagonal ``(i, i)`` entries are left untouched
+        (external fields are auto-scaled by the sampler).
+    next_var_index : int
+        First free auxiliary variable index. Returned value is the
+        post-split next-free index.
+    max_coupler_magnitude : float
+        Target maximum ``|J_ij|`` after splitting.
+
+    Returns
+    -------
+    tuple[dict, int]
+        Extended QUBO and the new next-free index.
+    """
+    if max_coupler_magnitude <= 0.0:
+        raise ValueError("max_coupler_magnitude must be positive")
+
+    extended: dict[tuple[int, int], float] = {}
+    for (i, j), val in Q.items():
+        if i == j or abs(val) <= max_coupler_magnitude:
+            extended[(i, j)] = extended.get((i, j), 0.0) + val
+            continue
+
+        k = int(math.ceil(abs(val) / max_coupler_magnitude))
+        per_term = val / k
+        extended[(i, j)] = extended.get((i, j), 0.0) + per_term
+
+        for _ in range(k - 1):
+            aux = next_var_index
+            next_var_index += 1
+            # Decouple |J_ij| via auxiliary spins that mirror i and j:
+            # (J_ij / k) * (sigma_i sigma_aux - sigma_j sigma_aux)
+            # keeps the ground-state energy landscape invariant while
+            # spreading the dynamic range across multiple couplers.
+            extended[(i, aux)] = extended.get((i, aux), 0.0) + per_term
+            extended[(j, aux)] = extended.get((j, aux), 0.0) - per_term
+
+    return extended, next_var_index
 
 @dataclass
 class MTDAQuboBuilder:
@@ -95,6 +185,12 @@ class MTDAQuboBuilder:
     include_false_alarm: bool = True
     missed_detection_cost: float = 5.0
     false_alarm_cost: float = 3.0
+    # Ohno-Togawa IEM (arXiv:2604.03546 Apr 2026) preprocessing.
+    # Triggered when the QUBO dynamic range exceeds the threshold,
+    # which is roughly the effective coupler precision of Advantage2
+    # Zephyr (~32 levels once the sampler's auto_scale kicks in).
+    apply_interaction_extension: bool = False
+    iem_dynamic_range_threshold: float = 50.0
 
     def __post_init__(self) -> None:
         if self.cost_builder is None:
@@ -158,12 +254,37 @@ class MTDAQuboBuilder:
         for key, val in col_Q.items():
             Q[key] = Q.get(key, 0.0) + val
 
-        return QUBOResult(
+        result = QUBOResult(
             Q=Q,
             num_variables=variables.num_variables,
             variables=variables,
             penalty=penalty,
         )
+        result.dynamic_range = result.compute_dynamic_range()
+        if (
+            self.apply_interaction_extension
+            and result.dynamic_range > self.iem_dynamic_range_threshold
+        ):
+            # Ohno-Togawa IEM (arXiv:2604.03546 Apr 2026):
+            # spread large couplers across auxiliary spins to fit within
+            # the effective precision of Zephyr couplers.
+            magnitudes = [abs(v) for (i, j), v in result.Q.items() if i != j]
+            if magnitudes:
+                m_target = max(magnitudes) / max(
+                    self.iem_dynamic_range_threshold, 1.0,
+                )
+                extended_Q, new_num = interaction_extension(
+                    result.Q, result.num_variables, m_target,
+                )
+                result = QUBOResult(
+                    Q=extended_Q,
+                    num_variables=new_num,
+                    variables=variables,
+                    penalty=penalty,
+                    has_higher_order_terms=result.has_higher_order_terms,
+                )
+                result.dynamic_range = result.compute_dynamic_range()
+        return result
 
     def build(
         self,

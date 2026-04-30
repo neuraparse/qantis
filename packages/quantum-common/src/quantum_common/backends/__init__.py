@@ -21,6 +21,7 @@ from quantum_common.backends.ibm import IBMQuantumBackend
 from quantum_common.backends.dwave import DWaveQuantumBackend
 from quantum_common.backends.pennylane import PennyLaneBackend
 from quantum_common.backends.azure import AzureQuantumBackend
+from quantum_common.backends.cuquantum_simulator import CuQuantumSimulator
 
 __all__ = [
     "ExecutionRequest",
@@ -32,6 +33,7 @@ __all__ = [
     "DWaveQuantumBackend",
     "PennyLaneBackend",
     "AzureQuantumBackend",
+    "CuQuantumSimulator",
     "create_backend",
     "list_available_backends",
     "register_backend",

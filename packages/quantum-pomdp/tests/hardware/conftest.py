@@ -75,7 +75,10 @@ def tiger_circuit(tiger_pomdp, tiger_uniform_belief):
 
     Uses hardware-compatible amplitude encoding (UCR_Y decomposition,
     Möttönen et al. 2004) and reward_precision_bits=2 to reduce depth
-    for NISQ hardware execution.
+    for NISQ hardware execution. Includes single-iterate Brassard
+    amplitude amplification (G^1(o)) even though Tiger sits at
+    P(o)=0.5, which is the Brassard identity point -- this circuit is
+    the depth-stress reference used for E3/E4 amplified-depth runs.
     """
     from quantum_pomdp.quantum_circuits.belief_update import (
         BeliefUpdateCircuitConfig,
@@ -99,6 +102,44 @@ def tiger_circuit(tiger_pomdp, tiger_uniform_belief):
             f"Tiger circuit build failed (pre-existing mcry qubit mismatch in "
             f"transition_unitary.py): {exc}"
         )
+
+
+@pytest.fixture(scope="session")
+def tiger_circuit_shallow(tiger_pomdp, tiger_uniform_belief):
+    """Shallow Tiger belief-update circuit (NO amplitude amplification).
+
+    Rationale: Tiger sits at P(o|b,a) = 0.5, which is Brassard-Hoyer-
+    Mosca-Tapp 2002 Eq. 8 identity -- one Grover iteration is a no-op
+    in amplitude but triples the depth. Under Heron R3 noise
+    (ECR ~ 1.5e-3 median), the AA path gets crushed by gate-error
+    accumulation and the posterior reverts to uniform. The shallow
+    path (depth ~1017, 300 ECR after transpile vs ~3000/918 for AA)
+    is the hardware-feasible *reference* for Task 1.1 and matches the
+    H < 0.15 acceptance criterion reported in the paper.
+
+    Use the AA circuit (`tiger_circuit` fixture) only for boundary-P(o)
+    experiments (E3), where sqrt(P(o)) is small enough that Brassard
+    iterations are productive.
+    """
+    from quantum_pomdp.quantum_circuits.belief_update import (
+        BeliefUpdateCircuitConfig,
+        QuantumBeliefUpdateCircuit,
+    )
+
+    config = BeliefUpdateCircuitConfig(
+        use_amplitude_amplification=False,
+        use_hardware_compatible_encoding=True,
+        reward_precision_bits=2,
+    )
+    builder = QuantumBeliefUpdateCircuit(pomdp=tiger_pomdp, config=config)
+    try:
+        return builder.build(
+            belief=tiger_uniform_belief,
+            action=0,
+            observation=0,
+        )
+    except Exception as exc:
+        pytest.skip(f"shallow Tiger build failed: {exc}")
 
 
 @pytest.fixture(scope="session")
