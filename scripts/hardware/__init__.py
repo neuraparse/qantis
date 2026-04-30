@@ -13,6 +13,205 @@ from typing import Any
 
 import numpy as np
 
+
+def _json_default(obj: Any) -> Any:
+    """JSON serialiser hook for numpy / non-native types."""
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serialisable")
+
+
+def save_partial(name: str, data: dict[str, Any]) -> Path:
+    """Write a checkpoint JSON to output/hardware mid-experiment.
+
+    Use inside long-running Pittsburgh loops so that a blocking
+    ``SamplerV2.run().result()`` hang (seen 2026-04-19) does not
+    destroy accumulated counts. The same
+    ``<name>_partial.json`` is overwritten on each call so tailing
+    scripts always see the latest state.
+    """
+    path = _output_dir() / f"{name}_partial.json"
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, default=_json_default)
+    return path
+
+
+def _fetch_result_robust(
+    job_id: str,
+    poll_timeout: float = 120.0,
+    max_total_wait: float = 7200.0,
+) -> Any:
+    """Robust replacement for ``job.result()`` in qiskit-ibm-runtime 0.42-0.46.
+
+    The stock ``SamplerV2`` job.result() is a blocking polling loop over
+    ``job.status()``. We repeatedly observed the client-side instance
+    hanging for hours after the server reported ``DONE`` (the 2026-04-19
+    campaign lost 3 experiments to this). The fix is to re-fetch the
+    job through a fresh :class:`QiskitRuntimeService` every
+    ``poll_timeout`` seconds so stale sockets and stuck polling loops
+    are bypassed. Total wall time is bounded by ``max_total_wait``.
+    """
+    import time
+
+    from qiskit_ibm_runtime import QiskitRuntimeService
+
+    start = time.time()
+    last_status = None
+    while True:
+        elapsed = time.time() - start
+        if elapsed > max_total_wait:
+            raise TimeoutError(
+                f"job {job_id} did not reach a final state within "
+                f"{max_total_wait:.0f}s"
+            )
+        try:
+            svc = QiskitRuntimeService()  # fresh client each iteration
+            j = svc.job(job_id)
+            status = str(j.status())
+            if status != last_status:
+                print(f"[heron] job {job_id} status={status} "
+                      f"elapsed={elapsed:.0f}s")
+                last_status = status
+            if status == "DONE":
+                return j.result(timeout=max(poll_timeout, 60.0))
+            if status in ("ERROR", "CANCELLED"):
+                raise RuntimeError(f"job {job_id} ended in {status}")
+        except TimeoutError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            print(f"[heron] transient poll error for {job_id}: "
+                  f"{type(exc).__name__}: {exc}; retrying")
+        time.sleep(min(poll_timeout, 30.0))
+
+
+def run_on_heron_batched(
+    circuits: list[Any],
+    backend_name: str,
+    shots: int,
+    optimization_level: int = 2,
+    checkpoint_name: str | None = None,
+    poll_timeout: float = 120.0,
+    max_total_wait: float = 7200.0,
+) -> tuple[list[dict[str, int]], str]:
+    """Submit many circuits to an IBM backend in a single Sampler run.
+
+    Builds a single :class:`SamplerV2` job with all circuits in one PUB
+    list so the backend dequeues them as a single workload (one queue
+    wait instead of ``len(circuits)``). The result is fetched via
+    :func:`_fetch_result_robust` which re-opens a fresh
+    :class:`QiskitRuntimeService` every ``poll_timeout`` seconds so
+    stale-socket hangs (observed repeatedly on 2026-04-19 for
+    qiskit-ibm-runtime 0.42-0.46) do not leak into the campaign.
+    ``max_total_wait`` bounds total wall time (default 2 hours).
+
+    Returns ``(counts_list, job_id)`` where ``counts_list`` is aligned
+    1:1 with the input circuit order.
+    """
+    from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
+    from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+
+    service = QiskitRuntimeService()  # saved account
+    backend = service.backend(backend_name)
+    pm = generate_preset_pass_manager(
+        optimization_level=optimization_level, backend=backend
+    )
+    isa_list = [pm.run(c) for c in circuits]
+    for isa in isa_list:
+        isa._layout = None
+
+    sampler = SamplerV2(mode=backend)
+    job = sampler.run(isa_list, shots=shots)
+    job_id = job.job_id()
+    print(f"[heron] submitted job {job_id} with {len(circuits)} circuits")
+
+    if checkpoint_name:
+        save_partial(checkpoint_name, {
+            "campaign": checkpoint_name,
+            "backend": backend_name,
+            "submitted_job_id": job_id,
+            "num_circuits": len(circuits),
+            "shots": shots,
+            "submitted_utc": datetime.now(tz=timezone.utc).isoformat(),
+            "note": (
+                "Partial checkpoint written before polling .result(). "
+                "If the wrapper still hangs, recover via "
+                "`QiskitRuntimeService().job(<job_id>).result()`."
+            ),
+        })
+
+    result = _fetch_result_robust(
+        job_id, poll_timeout=poll_timeout, max_total_wait=max_total_wait,
+    )
+    counts_list: list[dict[str, int]] = []
+    for pub in result:
+        try:
+            counts_list.append(databin_get_counts(pub))
+        except Exception as exc:
+            counts_list.append({"_error": f"{type(exc).__name__}: {exc}"})
+
+    return counts_list, job_id
+
+
+def run_on_aer_batched(
+    circuits: list[Any], shots: int
+) -> list[dict[str, int]]:
+    """Aer-equivalent of :func:`run_on_heron_batched` for dry-runs.
+
+    Transpiles to the Aer basis so controlled higher-level gates (e.g.
+    controlled-Hadamard used by the corridor-Tiger transition unitary)
+    decompose into Aer-executable primitives.
+    """
+    from qiskit import transpile
+    from qiskit_aer import AerSimulator
+
+    sim = AerSimulator()
+    counts_list = []
+    for circ in circuits:
+        try:
+            res = sim.run(circ, shots=shots).result()
+            counts_list.append(dict(res.get_counts()))
+        except Exception:
+            # Aer cannot execute non-standard gate names (e.g. ``cch``)
+            # natively; transpile to the Aer default basis and retry.
+            t = transpile(
+                circ,
+                basis_gates=["cx", "ccx", "cz", "rz", "sx", "x", "h", "ry", "rx",
+                             "u", "measure", "reset"],
+                optimization_level=1,
+            )
+            res = sim.run(t, shots=shots).result()
+            counts_list.append(dict(res.get_counts()))
+    return counts_list
+
+
+def databin_get_counts(pub_result: Any) -> dict[str, int]:
+    """Robustly pull ``{bitstring: count}`` out of a SamplerV2 PubResult.
+
+    qiskit-ibm-runtime renamed the DataBin field across 0.41 -> 0.42 and
+    the transpiler may also relabel the classical register based on the
+    circuit layout. Walk the DataBin and return the first field that
+    exposes a ``get_counts`` method.
+    """
+    data = getattr(pub_result, "data", pub_result)
+    for name in ("meas", "c", "meas_c", "classical", "cr"):
+        field = getattr(data, name, None)
+        if field is not None and hasattr(field, "get_counts"):
+            return dict(field.get_counts())
+    for name in dir(data):
+        if name.startswith("_"):
+            continue
+        field = getattr(data, name)
+        if hasattr(field, "get_counts"):
+            return dict(field.get_counts())
+    raise RuntimeError(
+        f"SamplerV2 DataBin exposes no classical field with get_counts; "
+        f"attributes: {[n for n in dir(data) if not n.startswith('_')]}"
+    )
+
 # ---------------------------------------------------------------------------
 # Output directory
 # ---------------------------------------------------------------------------
@@ -32,20 +231,8 @@ def save_result(name: str, data: dict[str, Any]) -> Path:
     """
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
     fname = _output_dir() / f"{name}_{timestamp}.json"
-
-    # Make numpy scalars JSON-serialisable
-    def _default(obj: Any) -> Any:
-        if isinstance(obj, (np.integer,)):
-            return int(obj)
-        if isinstance(obj, (np.floating,)):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        raise TypeError(f"Object of type {type(obj)} is not JSON serialisable")
-
     with fname.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, default=_default)
-
+        json.dump(data, fh, indent=2, default=_json_default)
     print(f"[saved] {fname}")
     return fname
 

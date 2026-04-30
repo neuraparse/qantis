@@ -66,3 +66,4 @@ configs/backends/ibm_quantum.yaml
 
 # General output directory
 output/
+docs/decision-engine-2026-strategy.md
